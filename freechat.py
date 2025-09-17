@@ -198,7 +198,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
 
     def _get_bottom_toolbar(self) -> FormattedText:
         text = f"Prompt: {self.active_prompt_name} | Model: {self.current_model} | Cost: ${self.session_cost:.4f} | (Ctrl+Enter)"
-        return [("class:bottom-toolbar", text)]
+        return FormattedText([("class:bottom-toolbar", text)])
 
     def _create_completer(self) -> FuzzyCompleter:
         cmds = list(self.commands.keys())
@@ -257,7 +257,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 with open(self.sessions_dir.parent / filename, "w", encoding="utf-8") as f: f.write(content)
             elif fmt == "json":
                 with open(self.sessions_dir.parent / filename, "w", encoding="utf-8") as f: json.dump(self.session_messages, f, ensure_ascii=False, indent=2)
-            elif fmt == "html": self.console.save_html(str(self.sessions_dir.parent / filename), clear_console=False)
+            elif fmt == "html": self.console.save_html(str(self.sessions_dir.parent / filename))
             elif fmt == "md-rendered":
                 # Create HTML file with rendered Markdown content
                 from rich.markdown import Markdown
@@ -349,7 +349,8 @@ class AIProvider(ABC):
     @abstractmethod
     async def get_models(self) -> Tuple[str, List[str]]: pass
     @abstractmethod
-    async def stream_chat(self, msgs: List[Dict], model: str) -> AsyncGenerator[str, None]: yield
+    async def stream_chat(self, msgs: List[Dict], model: str) -> AsyncGenerator[str, None]:
+        yield ""  # Abstract: subclasses should override and yield str chunks
     @abstractmethod
     def calculate_cost(self, p_tokens: int, c_tokens: int, model: str) -> Optional[float]: pass
 
@@ -376,9 +377,9 @@ class OpenAIProvider(AIProvider):
                     try:
                         if content := json.loads(data)["choices"][0]["delta"].get("content"): yield content
                     except (json.JSONDecodeError, IndexError): continue
-    def calculate_cost(self, p_tok: int, c_tok: int, model: str) -> Optional[float]:
+    def calculate_cost(self, p_tokens: int, c_tokens: int, model: str) -> Optional[float]:
         # [V2.2.1] Removed cleaning logic.
-        return (p_tok * self.prices[model]["input"] + c_tok * self.prices[model]["output"]) if model in self.prices else None
+        return (p_tokens * self.prices[model]["input"] + c_tokens * self.prices[model]["output"]) if model in self.prices else None
 
 class GeminiProvider(AIProvider):
     URL, MODELS = "https://generativelanguage.googleapis.com/v1beta/models", ["gemini-1.5-pro-latest", "gemini-1.5-flash-latest", "gemini-pro"]
@@ -403,7 +404,7 @@ class GeminiProvider(AIProvider):
                     try:
                         if text := json.loads(line[len("data:"):].strip())["candidates"][0]["content"]["parts"][0]["text"]: yield text
                     except (json.JSONDecodeError, IndexError, KeyError): continue
-    def calculate_cost(self, p_tok: int, c_tok: int, model: str) -> Optional[float]: return None
+    def calculate_cost(self, p_tokens: int, c_tokens: int, model: str) -> Optional[float]: return None
 
 class ProviderFactory:
     def __init__(self, config: Dict):

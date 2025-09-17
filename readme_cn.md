@@ -1,6 +1,6 @@
 # FreeChat 💬
 
-**您的全功能、便携式终端 AI 聊天利器 - v2.2.1 支持 Markdown 渲染**
+**您的全功能、便携式终端 AI 聊天利器 - v2.2.2 支持 Markdown 渲染**
 
 `FreeChat` 是一个功能强大、部署简单的单文件 AI 聊天命令行工具，专为在云端 VPS 上使用而设计。通过 SSH 连接后，它为您提供一个集成了多个主流 AI 提供商（如 OpenRouter, OpenAI, Gemini）的、功能丰富且响应迅速的聊天界面。
 
