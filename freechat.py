@@ -6,7 +6,7 @@ FreeChat: A powerful, single-file AI chat CLI for your VPS.
 This version removes the smart model name cleaning logic.
 
 Author: AI Assistant (Generated for User Task)
-Version: 2.2.1 (Stable)
+Version: 2.2.2 (Stable)
 License: MIT
 """
 
@@ -219,7 +219,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
   [cyan]/model <name>[/cyan]          Switch AI model.
   [cyan]/prompt <action>[/cyan]        Manage system prompts: [dim]list, view, <name>[/dim].
   [cyan]/session new[/cyan]           Start a new chat session with the default prompt.
-  [cyan]/export <format>[/cyan]       Export session: [dim]md, json, html[/dim].
+  [cyan]/export <format>[/cyan]       Export session: [dim]md, json, html, md-rendered[/dim].
   [cyan]/clear[/cyan]                 Clear the terminal screen.
   [cyan]/exit[/cyan]                  Exit the application.
 [bold]Usage:[/bold]
@@ -250,8 +250,8 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         self.console.print(f"[bold green]✓ New session started with default prompt '{self.default_prompt_name}'.[/bold green]")
         
     async def _handle_export_command(self, args: List[str]):
-        if not args: self.console.print("[yellow]Usage: /export <md|json|html>[/yellow]"); return
-        fmt = args[0].lower(); filename = f"freechat_session_{self.session_name or int(time.time())}.{fmt}"
+        if not args: self.console.print("[yellow]Usage: /export <md|json|html|md-rendered>[/yellow]"); return
+        fmt = args[0].lower(); filename = f"freechat_session_{self.session_name or int(time.time())}.{fmt if fmt != 'md-rendered' else 'html'}"
         try:
             if fmt == "md":
                 content = "".join(f"**{'You' if m['role']=='user' else 'AI'}:**\n\n{m['content']}\n\n---\n\n" for m in self.session_messages if m['role'] != 'system')
@@ -259,6 +259,52 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             elif fmt == "json":
                 with open(self.sessions_dir.parent / filename, "w", encoding="utf-8") as f: json.dump(self.session_messages, f, ensure_ascii=False, indent=2)
             elif fmt == "html": self.console.save_html(str(self.sessions_dir.parent / filename), clear_console=False)
+            elif fmt == "md-rendered":
+                # Create HTML file with rendered Markdown content
+                from rich.markdown import Markdown
+                from rich.console import Console as RichConsole
+                from io import StringIO
+                
+                # Create a string buffer to capture rendered output
+                buffer = StringIO()
+                # Create a console that outputs to the buffer
+                render_console = RichConsole(file=buffer, width=80, force_terminal=False, force_interactive=False)
+                
+                html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset=\"utf-8\">
+    <title>FreeChat Session</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji'; max-width: 800px; margin: 0 auto; padding: 20px; }}
+        .message {{ margin-bottom: 20px; }}
+        .user {{ background-color: #f0f0f0; padding: 15px; border-radius: 5px; }}
+        .ai {{ background-color: #e3f2fd; padding: 15px; border-radius: 5px; }}
+        .role {{ font-weight: bold; margin-bottom: 5px; }}
+        hr {{ border: 0; border-top: 1px solid #eee; margin: 20px 0; }}
+        pre {{ background-color: #f5f5f5; padding: 10px; border-radius: 3px; overflow-x: auto; }}
+        code {{ font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; }}
+        .rendered-md {{ white-space: pre-wrap; font-family: inherit; }}
+    </style>
+</head>
+<body>
+"""
+                for msg in self.session_messages:
+                    if msg['role'] != 'system':
+                        role = 'You' if msg['role'] == 'user' else 'AI'
+                        css_class = 'user' if msg['role'] == 'user' else 'ai'
+                        html_content += f'<div class=\"message {css_class}\">\n<div class=\"role\">{role}:</div>\n'
+                        # Render markdown content using Rich
+                        md = Markdown(msg['content'])
+                        render_console.print(md)
+                        rendered_content = buffer.getvalue()
+                        buffer.seek(0)
+                        buffer.truncate(0)
+                        # Convert to HTML-safe content
+                        rendered_content = rendered_content.replace('&', '&').replace('<', '<').replace('>', '>')
+                        html_content += f'<div class=\"rendered-md\">{rendered_content}</div>\n</div>\n<hr>\n'
+                html_content += "</body>\n</html>"
+                with open(self.sessions_dir.parent / filename, "w", encoding="utf-8") as f: f.write(html_content)
             else: self.console.print(f"[bold red]Error: Unknown format '{fmt}'.[/bold red]"); return
             self.console.print(f"[bold green]✓ Session exported to {filename}[/bold green]")
         except Exception as e: self.console.print(f"[bold red]Error exporting session: {e}[/bold red]")

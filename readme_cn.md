@@ -1,6 +1,6 @@
 # FreeChat 💬
 
-**您的全功能、便携式终端 AI 聊天利器**
+**您的全功能、便携式终端 AI 聊天利器 - v2.2.1 支持 Markdown 渲染**
 
 `FreeChat` 是一个功能强大、部署简单的单文件 AI 聊天命令行工具，专为在云端 VPS 上使用而设计。通过 SSH 连接后，它为您提供一个集成了多个主流 AI 提供商（如 OpenRouter, OpenAI, Gemini）的、功能丰富且响应迅速的聊天界面。
 
@@ -18,6 +18,7 @@
 *   💡 **智能命令行体验**: 拥有现代化的 CLI 功能，包括命令自动补全（Tab）、历史记录导航（↑↓）、反向历史搜索（Ctrl+R）和自动建议。
 *   ⌨️ **现代快捷键**: 使用 `Control + Enter` 提交多行输入，符合现代应用习惯。
 *   💾 **会话管理与导出**: 支持新建、保存和加载聊天会話，并可轻松将会话记录导出为 Markdown, JSON 或 HTML 格式。
+*   🎨 **Markdown 渲染支持**: 使用新的 `md-rendered` 导出选项，以美观的格式导出带有渲染 Markdown 内容的会话。
 
 ## 🚀 安装与设置
 
@@ -107,6 +108,10 @@ mv ~/.config/freechat/* /path/to/your/script/freechat_config/
 *   **使用命令**: 所有特殊功能都通过以斜杠 `/` 开头的命令实现。输入 `/` 然后按 `Tab` 键可以查看和补全所有可用命令。
 *   **查看帮助**: 在应用内输入 `/help` 可以随时查看命令列表。
 
+### 新功能：Markdown 渲染支持
+
+FreeChat 现在支持导出带有渲染 Markdown 内容的会话。当您使用 `/export md-rendered` 命令时，它将生成一个 HTML 文件，其中包含格式正确的 Markdown 内容，包括粗体文本、斜体文本、代码块和其他 Markdown 元素，以视觉上吸引人的方式呈现。
+
 ### ⌨️ 命令参考
 
 | 命令 | 参数 | 描述 |
@@ -117,7 +122,7 @@ mv ~/.config/freechat/* /path/to/your/script/freechat_config/
 | | `view` | 查看当前正在使用的系统提示的完整内容。|
 | | `<name>` | 切换到指定的系统提示，并自动开始一个新会话。例如: `/prompt coder`。|
 | `/session`| `new` | 开始一个全新的聊天会话，并应用默认的系统提示。|
-| `/export` | `<format>` | 将当前会话导出为指定格式的文件。支持的格式: `md`, `json`, `html`。 |
+| `/export` | `<format>` | 将当前会话导出为指定格式的文件。支持的格式: `md`, `json`, `html`, `md-rendered`。 |
 | `/clear` | (无) | 清空当前终端屏幕。 |
 | `/exit` | (无) | 退出 FreeChat 应用。 |
 

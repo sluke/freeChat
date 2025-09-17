@@ -1,6 +1,6 @@
 # FreeChat 💬
 
-**Your all-in-one, portable terminal AI chat tool**
+**Your all-in-one, portable terminal AI chat tool - v2.2.1 with Markdown Rendering Support**
 
 `FreeChat` is a powerful, easy-to-deploy single-file AI chat command line tool, designed specifically for use on cloud VPS. After connecting via SSH, it provides you with a feature-rich and responsive chat interface that integrates multiple mainstream AI providers (such as OpenRouter, OpenAI, Gemini).
 
@@ -18,6 +18,7 @@
 *   💡 **Intelligent Command Line Experience**: Features a modern CLI with command autocompletion (Tab), history navigation (↑↓), reverse history search (Ctrl+R), and auto-suggestions.
 *   ⌨️ **Modern Shortcuts**: Use `Control + Enter` to submit multi-line input, conforming to modern application habits.
 *   💾 **Session Management and Export**: Supports creating, saving, and loading chat sessions, with the ability to easily export session records in Markdown, JSON, or HTML formats.
+*   🎨 **Markdown Rendering Support**: Export sessions with beautifully rendered Markdown content in HTML format using the new `md-rendered` export option.
 
 ## 🚀 Installation and Setup
 
@@ -107,6 +108,10 @@ mv ~/.config/freechat/* /path/to/your/script/freechat_config/
 *   **Using Commands**: All special functions are implemented through commands starting with a slash `/`. Type `/` and press the `Tab` key to view and autocomplete all available commands.
 *   **View Help**: Type `/help` at any time within the application to see the command list.
 
+### New Feature: Markdown Rendering Support
+
+FreeChat now supports exporting sessions with rendered Markdown content. When you use the `/export md-rendered` command, it will generate an HTML file with properly formatted Markdown content, including bold text, italic text, code blocks, and other Markdown elements rendered in a visually appealing way.
+
 ### ⌨️ Command Reference
 
 | Command | Parameters | Description |
@@ -117,7 +122,7 @@ mv ~/.config/freechat/* /path/to/your/script/freechat_config/
 | | `view` | View the full content of the currently used system prompt. |
 | | `<name>` | Switch to the specified system prompt and automatically start a new session. Example: `/prompt coder`. |
 | `/session`| `new` | Start a completely new chat session with the default system prompt applied. |
-| `/export` | `<format>` | Export the current session to a file in the specified format. Supported formats: `md`, `json`, `html`. |
+| `/export` | `<format>` | Export the current session to a file in the specified format. Supported formats: `md`, `json`, `html`, `md-rendered`. |
 | `/clear` | (none) | Clear the current terminal screen. |
 | `/exit` | (none) | Exit the FreeChat application. |
 
