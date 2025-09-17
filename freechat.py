@@ -3,7 +3,6 @@
 
 """
 FreeChat: A powerful, single-file AI chat CLI for your VPS.
-This version removes the smart model name cleaning logic.
 
 Author: AI Assistant (Generated for User Task)
 Version: 2.2.2 (Stable)
@@ -301,7 +300,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                         buffer.seek(0)
                         buffer.truncate(0)
                         # Convert to HTML-safe content
-                        rendered_content = rendered_content.replace('&', '&').replace('<', '<').replace('>', '>')
+                        rendered_content = rendered_content.replace("&", "&").replace("<", "<").replace(">", ">")
                         html_content += f'<div class=\"rendered-md\">{rendered_content}</div>\n</div>\n<hr>\n'
                 html_content += "</body>\n</html>"
                 with open(self.sessions_dir.parent / filename, "w", encoding="utf-8") as f: f.write(html_content)
