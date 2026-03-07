@@ -1,6 +1,6 @@
 # FreeChat 💬
 
-**Your all-in-one, portable terminal AI chat tool - v2.2.2 with Markdown Rendering Support**
+**Your all-in-one, portable terminal AI chat tool - v2.2.4 with Performance Optimizations**
 
 `FreeChat` is a powerful, easy-to-deploy single-file AI chat command line tool, designed specifically for use on cloud VPS. After connecting via SSH, it provides you with a feature-rich and responsive chat interface that integrates multiple mainstream AI providers (such as OpenRouter, OpenAI, Gemini).
 
@@ -19,6 +19,7 @@
 *   ⌨️ **Modern Shortcuts**: Use `Control + Enter` to submit multi-line input, conforming to modern application habits.
 *   💾 **Session Management and Export**: Supports creating, saving, and loading chat sessions, with the ability to easily export session records in Markdown, JSON, or HTML formats.
 *   🎨 **Markdown Rendering Support**: Export sessions with beautifully rendered Markdown content in HTML format using the new `md-rendered` export option.
+*   ⚡ **Performance Optimizations**: Includes connection pooling, model caching, token counting optimization, and memory management for faster response times and reduced resource usage.
 
 ## 🚀 Installation and Setup
 

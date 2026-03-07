@@ -5,7 +5,7 @@
 FreeChat: A powerful, single-file AI chat CLI for your VPS.
 
 Author: AI Assistant (Generated for User Task)
-Version: 2.2.2 (Stable)
+Version: 2.2.4 (Stable)
 License: MIT
 """
 
@@ -97,12 +97,16 @@ class FreeChatApp:
         # [V2.2.1] Default model set to the API-compatible ID.
         self.current_model: str = self.config.get("general", {}).get("default_model", "openrouter/deepseek/deepseek-chat-v3.1:free")
         self.session_messages: List[Dict[str, Any]] = []
+        self.MAX_HISTORY_MESSAGES: int = 50  # Maximum number of messages to keep
         self.session_cost: float = 0.0
         self.session_name: Optional[str] = None
         self.available_models: Dict[str, List[str]] = {}
+        self.models_last_fetched: float = 0
+        self.MODELS_CACHE_TTL: int = 3600  # 1 hour cache
         self.provider_factory = ProviderFactory(self.config)
         try: self.tokenizer = tiktoken.get_encoding("cl100k_base")
         except Exception: self.tokenizer = None; self.console.print("[yellow]Warning:[/] `tiktoken` not found. Token counts approximate.")
+        self._token_cache: Dict[str, int] = {}
         self.commands: Dict[str, Callable] = {
             "/help": self._display_help, "/model": self._handle_model_command,
             "/prompt": self._handle_prompt_command,
@@ -117,6 +121,9 @@ class FreeChatApp:
             
         self.prompt_session = PromptSession(history=FileHistory(str(self.history_path)), multiline=True, auto_suggest=AutoSuggestFromHistory(), key_bindings=bindings)
         self.style = Style.from_dict({'bottom-toolbar': '#ffffff bg:#333333'})
+        self._completer = None
+        self._completer_last_updated = 0
+        self._export_console = None
         
         self._apply_prompt(self.default_prompt_name, is_startup=True)
 
@@ -188,23 +195,65 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             self.console.print(table)
         else: self._apply_prompt(args[0])
 
-    async def _fetch_models(self):
+    async def _fetch_models(self, force_refresh: bool = False):
+        current_time = time.time()
+        if not force_refresh and self.available_models and (current_time - self.models_last_fetched) < self.MODELS_CACHE_TTL:
+            return
+        
         self.console.print("[dim]Fetching available models...[/dim]")
         tasks = [p.get_models() for n in self.provider_factory.get_available_providers() if (p := self.provider_factory.get_provider(f"{n}/any"))]
+        if not tasks:
+            return
+        
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for r in results:
             if isinstance(r, tuple): self.available_models[r[0]] = r[1]
             elif isinstance(r, Exception): self.console.print(f"[yellow]Warning: Failed to fetch models: {r}[/yellow]")
+        
+        self.models_last_fetched = current_time
 
     def _get_bottom_toolbar(self) -> FormattedText:
         text = f"Prompt: {self.active_prompt_name} | Model: {self.current_model} | Cost: ${self.session_cost:.4f} | (Ctrl+Enter)"
         return FormattedText([("class:bottom-toolbar", text)])
 
+    def _count_tokens(self, text: str) -> int:
+        """Count tokens with caching to avoid repeated calculations."""
+        if not self.tokenizer:
+            return 0
+        if text in self._token_cache:
+            return self._token_cache[text]
+        count = len(self.tokenizer.encode(text))
+        self._token_cache[text] = count
+        # Limit cache size to prevent memory issues
+        if len(self._token_cache) > 1000:
+            # Remove oldest items
+            for key in list(self._token_cache.keys())[:500]:
+                del self._token_cache[key]
+        return count
+    
+    def _manage_message_history(self):
+        """Manage message history to keep it within limits."""
+        if len(self.session_messages) > self.MAX_HISTORY_MESSAGES:
+            # Keep the system prompt and the most recent messages
+            system_prompt = next((msg for msg in self.session_messages if msg['role'] == 'system'), None)
+            recent_messages = self.session_messages[-self.MAX_HISTORY_MESSAGES:]
+            if system_prompt and not any(msg['role'] == 'system' for msg in recent_messages):
+                recent_messages.insert(0, system_prompt)
+            self.session_messages = recent_messages
+    
     def _create_completer(self) -> FuzzyCompleter:
+        current_time = time.time()
         cmds = list(self.commands.keys())
         models = [f"{p}/{m}" for p, ml in self.available_models.items() for m in ml]
         prompts = list(self.prompts.keys())
-        return FuzzyCompleter(WordCompleter(cmds + models + prompts, ignore_case=True))
+        
+        # Check if we need to recreate the completer
+        if (not self._completer or 
+            current_time - self._completer_last_updated > 300):  # 5 minutes
+            self._completer = FuzzyCompleter(WordCompleter(cmds + models + prompts, ignore_case=True))
+            self._completer_last_updated = current_time
+        
+        return self._completer
 
     def _display_welcome(self):
         banner = Text("FreeChat v2.2.1 (Stable)", style="bold magenta", justify="center")
@@ -266,8 +315,13 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 
                 # Create a string buffer to capture rendered output
                 buffer = StringIO()
-                # Create a console that outputs to the buffer
-                render_console = RichConsole(file=buffer, width=80, force_terminal=False, force_interactive=False)
+                # Use cached RichConsole instance or create a new one
+                if not self._export_console:
+                    self._export_console = RichConsole(file=buffer, width=80, force_terminal=False, force_interactive=False)
+                else:
+                    # Reset the file object for the console
+                    self._export_console.file = buffer
+                render_console = self._export_console
                 
                 html_content = f"""<!DOCTYPE html>
 <html>
@@ -312,7 +366,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         self.console.print(f"[bold cyan]You:[/bold cyan] {prompt}")
         if not (provider := self.provider_factory.get_provider(self.current_model)): self.console.print(f"[bold red]Error: Provider for '{self.current_model}' not found.[/bold red]"); return
         self.session_messages.append({"role": "user", "content": prompt})
-        prompt_tokens = len(self.tokenizer.encode(prompt)) if self.tokenizer else 0
+        prompt_tokens = self._count_tokens(prompt)
         
         # [V2.2.1] Removed smart cleaning. The exact model name is used.
         provider_name, model_name = self.current_model.split('/', 1)
@@ -328,21 +382,43 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         except httpx.HTTPStatusError as e: self.console.print(f"\n[bold red]API Error {e.response.status_code}:[/bold red] {e.response.text}"); self.session_messages.pop(); return
         except Exception as e: self.console.print(f"\n[bold red]Error: {e}[/bold red]"); self.session_messages.pop(); return
         self.session_messages.append({"role": "assistant", "content": full_response})
-        cost = provider.calculate_cost(prompt_tokens, len(self.tokenizer.encode(full_response)) if self.tokenizer else 0, model_name)
+        self._manage_message_history()  # Manage message history after adding response
+        cost = provider.calculate_cost(prompt_tokens, self._count_tokens(full_response), model_name)
         if cost is not None: self.session_cost += cost
         self.console.print(f"[dim]Time: {(time.time() - start_time):.2f}s | Cost: {'N/A' if cost is None else f'${cost:.6f}'}[/dim]")
         
+    async def close_providers(self):
+        """Close all provider HTTP clients to free resources."""
+        for provider in self.provider_factory.providers.values():
+            try:
+                await provider.close()
+            except Exception:
+                pass
+    
     async def run(self):
         self._display_welcome(); await self._fetch_models()
         while True:
             try:
                 inp = await self.prompt_session.prompt_async(">", bottom_toolbar=self._get_bottom_toolbar, style=self.style, completer=self._create_completer(), refresh_interval=0.5)
                 if inp.strip(): await (self._handle_command if inp.startswith('/') else self._handle_prompt)(inp)
-            except (EOFError, KeyboardInterrupt): self.console.print("\n[bold]Goodbye![/bold]"); return
+            except (EOFError, KeyboardInterrupt): 
+                await self.close_providers()
+                self.console.print("\n[bold]Goodbye![/bold]"); return
 
 # --- AI Provider Abstraction ---
 class AIProvider(ABC):
-    def __init__(self, key: str): self.api_key, self.http = key, httpx.AsyncClient(timeout=120.0)
+    def __init__(self, key: str): 
+        self.api_key = key
+        self.http = httpx.AsyncClient(
+            timeout=120.0,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            http2=True
+        )
+    
+    async def close(self):
+        """Close the HTTP client to free resources."""
+        if hasattr(self, 'http') and self.http:
+            await self.http.aclose()
     @property
     @abstractmethod
     def name(self) -> str: pass
@@ -419,5 +495,11 @@ class ProviderFactory:
 # --- Main Execution ---
 async def main(): await FreeChatApp().run()
 if __name__ == "__main__":
-    try: asyncio.run(main())
-    except Exception: Console().print_exception()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nGoodbye!")
+    except Exception as e:
+        console = Console()
+        console.print(f"[bold red]Fatal error: {e}[/bold red]")
+        console.print_exception()
