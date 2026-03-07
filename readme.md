@@ -1,6 +1,6 @@
 # FreeChat 💬
 
-**Your all-in-one, portable terminal AI chat tool - v2.2.4 with Performance Optimizations**
+**Your all-in-one, portable terminal AI chat tool - v2.2.5 with Performance Optimizations**
 
 `FreeChat` is a powerful, easy-to-deploy single-file AI chat command line tool, designed specifically for use on cloud VPS. After connecting via SSH, it provides you with a feature-rich and responsive chat interface that integrates multiple mainstream AI providers (such as OpenRouter, OpenAI, Gemini).
 
@@ -143,7 +143,7 @@ This file stores your API keys and general settings.
 [general]
 # Set the model to load by default at startup.
 # Format is "provider_name/model_identifier".
-default_model = "openrouter/meta-llama/llama-3-8b-instruct:free"
+default_model = "openrouter/stepfun/step-3.5-flash:free"
 
 # Set the system prompt name to load by default at startup. This name corresponds to an entry in prompts.toml.
 default_prompt = "default"

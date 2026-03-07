@@ -1,6 +1,6 @@
 # FreeChat 💬
 
-**您的全功能、便携式终端 AI 聊天利器 - v2.2.4 性能优化版**
+**您的全功能、便携式终端 AI 聊天利器 - v2.2.5 性能优化版**
 
 `FreeChat` 是一个功能强大、部署简单的单文件 AI 聊天命令行工具，专为在云端 VPS 上使用而设计。通过 SSH 连接后，它为您提供一个集成了多个主流 AI 提供商（如 OpenRouter, OpenAI, Gemini）的、功能丰富且响应迅速的聊天界面。
 
@@ -143,7 +143,7 @@ FreeChat 现在支持导出带有渲染 Markdown 内容的会话。当您使用 
 [general]
 # 设置启动时默认加载的模型。
 # 格式为 "provider_name/model_identifier"。
-default_model = "openrouter/meta-llama/llama-3-8b-instruct:free"
+default_model = "openrouter/stepfun/step-3.5-flash:free"
 
 # 设置启动时默认加载的系统提示名称，该名称对应 prompts.toml 中的一项。
 default_prompt = "default"

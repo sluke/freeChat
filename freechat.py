@@ -5,7 +5,7 @@
 FreeChat: A powerful, single-file AI chat CLI for your VPS.
 
 Author: AI Assistant (Generated for User Task)
-Version: 2.2.4 (Stable)
+Version: 2.2.5 (Stable)
 License: MIT
 """
 
@@ -30,7 +30,8 @@ import subprocess, importlib.util, os, time
 
 def bootstrap():
     """Checks and installs dependencies before the main application runs."""
-    required = {"prompt_toolkit": "prompt_toolkit>=3.0", "rich": "rich>=13.0", "httpx": "httpx[http2]>=0.25", "tiktoken": "tiktoken>=0.5"}
+    # Add urllib3<2.0 to avoid LibreSSL compatibility issues on macOS
+    required = {"prompt_toolkit": "prompt_toolkit>=3.0", "rich": "rich>=13.0", "httpx": "httpx[http2]>=0.25", "tiktoken": "tiktoken>=0.5", "urllib3": "urllib3<2.0"}
     if sys.version_info < (3, 11): required["tomli"] = "tomli>=2.0"
     missing = [pkg for name, pkg in required.items() if not importlib.util.find_spec(name)]
     if not missing: return
@@ -95,7 +96,7 @@ class FreeChatApp:
         self.active_prompt_content: str = ""
         
         # [V2.2.1] Default model set to the API-compatible ID.
-        self.current_model: str = self.config.get("general", {}).get("default_model", "openrouter/deepseek/deepseek-chat-v3.1:free")
+        self.current_model: str = self.config.get("general", {}).get("default_model", "openrouter/stepfun/step-3.5-flash:free")
         self.session_messages: List[Dict[str, Any]] = []
         self.MAX_HISTORY_MESSAGES: int = 50  # Maximum number of messages to keep
         self.session_cost: float = 0.0
@@ -140,7 +141,7 @@ class FreeChatApp:
 [general]
 # The format is "provider_name/model_identifier".
 # NOTE: Use the exact model ID required by the API (e.g., without ':free').
-default_model = "openrouter/deepseek/deepseek-chat-v3.1:free"
+default_model = "openrouter/stepfun/step-3.5-flash:free"
 default_prompt = "default"
 [providers]
 openai_api_key = ""
@@ -256,7 +257,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         return self._completer
 
     def _display_welcome(self):
-        banner = Text("FreeChat v2.2.1 (Stable)", style="bold magenta", justify="center")
+        banner = Text("FreeChat v2.2.5 (Stable)", style="bold magenta", justify="center")
         info = Text("Type /help for commands, /exit to quit. Press Control or Command + Enter to send.", style="dim", justify="center")
         self.console.print(Panel.fit(Text.assemble(banner, "\n", info), padding=(1, 4)))
         
