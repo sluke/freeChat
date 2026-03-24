@@ -127,6 +127,7 @@ FreeChat 现在支持导出带有渲染 Markdown 内容的会话。当您使用 
 | | `load <name>` | 加载之前保存的会话。 |
 | | `list` | 列出所有已保存的会话。 |
 | `/file` | `upload <path>` | 上传并处理文件。支持的格式: txt, md, json, csv, py, js, html, css, pdf。 |
+| `/language` | `<code>` | 切换界面语言。不带参数可列出可用语言。 |
 | `/export` | `<format>` | 将当前会话导出为指定格式的文件。支持的格式: `md`, `json`, `html`, `md-rendered`。 |
 | `/clear` | (无) | 清空当前终端屏幕。 |
 | `/exit` | (无) | 退出 FreeChat 应用。 |
@@ -191,6 +192,59 @@ prompt = """You are an expert programmer. Provide only code solutions."""
 prompt = """You are a multilingual translator. Your task is to translate the user's text into English."""
 ```
 
+## 🚀 部署选项
+
+### Docker 部署
+
+FreeChat 可以使用 Docker 进行部署，以便更轻松地管理和隔离。
+
+**Docker 部署步骤：**
+
+1. **构建 Docker 镜像**
+   ```bash
+   docker build -t freechat .
+   ```
+
+2. **运行 Docker 容器**
+   ```bash
+   docker run -it --name freechat -v ./freechat_config:/app/freechat_config freechat
+   ```
+
+3. **使用 docker-compose**
+   ```bash
+   docker-compose up -d
+   docker-compose exec freechat python freechat.py
+   ```
+
+### 系统服务安装
+
+FreeChat 可以使用 systemd 安装为系统服务。
+
+**安装为系统服务的步骤：**
+
+1. **编辑服务文件**
+   ```bash
+   nano freechat.service
+   ```
+   将 `your_username` 替换为您的实际用户名，将 `/path/to/freechat` 替换为您的 FreeChat 安装的实际路径。
+
+2. **复制服务文件**
+   ```bash
+   sudo cp freechat.service /etc/systemd/system/
+   ```
+
+3. **重新加载 systemd 并启动服务**
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable freechat
+   sudo systemctl start freechat
+   ```
+
+4. **检查服务状态**
+   ```bash
+   sudo systemctl status freechat
+   ```
+
 ## 🤔 常见问题 (FAQ)
 
 *   **Q: 启动时报错 `INCOMPATIBLE PYTHON VERSION`。**  
@@ -204,6 +258,12 @@ prompt = """You are a multilingual translator. Your task is to translate the use
 
 *   **Q: 我可以添加新的 AI 提供商吗？**  
     A: 当然可以。脚本的 `AIProvider` 抽象类设计使其易于扩展。您只需参考 `OpenAIProvider` 或 `GeminiProvider` 的实现，为新的 API 创建一个子类即可。
+
+*   **Q: 如何在 Docker 中运行 FreeChat？**  
+    A: 请按照部署选项部分中的 Docker 部署说明进行操作。
+
+*   **Q: 如何将 FreeChat 安装为系统服务？**  
+    A: 请按照部署选项部分中的系统服务安装说明进行操作。
 
 ## 📄 许可证
 

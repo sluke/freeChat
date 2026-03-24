@@ -127,6 +127,7 @@ FreeChat now supports exporting sessions with rendered Markdown content. When yo
 | | `load <name>` | Load a previously saved session. |
 | | `list` | List all saved sessions. |
 | `/file` | `upload <path>` | Upload and process a file. Supported formats: txt, md, json, csv, py, js, html, css, pdf. |
+| `/language` | `<code>` | Switch interface language. Use without arguments to list available languages. |
 | `/export` | `<format>` | Export the current session to a file in the specified format. Supported formats: `md`, `json`, `html`, `md-rendered`. |
 | `/clear` | (none) | Clear the current terminal screen. |
 | `/exit` | (none) | Exit the FreeChat application. |
@@ -191,6 +192,59 @@ prompt = """You are an expert programmer. Provide only code solutions."""
 prompt = """You are a multilingual translator. Your task is to translate the user's text into English."""
 ```
 
+## 🚀 Deployment Options
+
+### Docker Deployment
+
+FreeChat can be deployed using Docker for easier management and isolation.
+
+**Steps to deploy with Docker:**
+
+1. **Build the Docker image**
+   ```bash
+   docker build -t freechat .
+   ```
+
+2. **Run the Docker container**
+   ```bash
+   docker run -it --name freechat -v ./freechat_config:/app/freechat_config freechat
+   ```
+
+3. **Using docker-compose**
+   ```bash
+   docker-compose up -d
+   docker-compose exec freechat python freechat.py
+   ```
+
+### System Service Installation
+
+FreeChat can be installed as a system service using systemd.
+
+**Steps to install as a system service:**
+
+1. **Edit the service file**
+   ```bash
+   nano freechat.service
+   ```
+   Replace `your_username` with your actual username and `/path/to/freechat` with the actual path to your FreeChat installation.
+
+2. **Copy the service file**
+   ```bash
+   sudo cp freechat.service /etc/systemd/system/
+   ```
+
+3. **Reload systemd and start the service**
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable freechat
+   sudo systemctl start freechat
+   ```
+
+4. **Check the service status**
+   ```bash
+   sudo systemctl status freechat
+   ```
+
 ## 🤔 Frequently Asked Questions (FAQ)
 
 *   **Q: Error `INCOMPATIBLE PYTHON VERSION` on startup.**  
@@ -204,6 +258,12 @@ prompt = """You are a multilingual translator. Your task is to translate the use
 
 *   **Q: Can I add new AI providers?**  
     A: Absolutely. The script's `AIProvider` abstract class is designed for easy extension. You just need to create a subclass for the new API, referring to the implementation of `OpenAIProvider` or `GeminiProvider`.
+
+*   **Q: How to run FreeChat in Docker?**  
+    A: Follow the Docker deployment instructions in the Deployment Options section.
+
+*   **Q: How to install FreeChat as a system service?**  
+    A: Follow the system service installation instructions in the Deployment Options section.
 
 ## 📄 License
 
