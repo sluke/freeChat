@@ -105,13 +105,17 @@ class FreeChatApp:
         self.models_last_fetched: float = 0
         self.MODELS_CACHE_TTL: int = 3600  # 1 hour cache
         self.provider_factory = ProviderFactory(self.config)
-        try: self.tokenizer = tiktoken.get_encoding("cl100k_base")
-        except Exception: self.tokenizer = None; self.console.print("[yellow]Warning:[/] `tiktoken` not found. Token counts approximate.")
+        try: 
+            self.tokenizer = tiktoken.get_encoding("cl100k_base")
+        except Exception as e:
+            self.tokenizer = None
+            self.console.print(f"[yellow]Warning:[/] `tiktoken` not found or failed to load: {e}. Token counts will be approximate.")
         self._token_cache: Dict[str, int] = {}
         self.commands: Dict[str, Callable] = {
             "/help": self._display_help, "/model": self._handle_model_command,
             "/prompt": self._handle_prompt_command,
             "/session": self._handle_session_command, "/export": self._handle_export_command,
+            "/file": self._handle_file_command,
             "/clear": lambda args: self.console.clear(), "/exit": self._exit_app,
         }
         
@@ -119,8 +123,41 @@ class FreeChatApp:
         @bindings.add("c-j")
         @bindings.add("c-m")
         def _(event): event.current_buffer.validate_and_handle()
-            
-        self.prompt_session = PromptSession(history=FileHistory(str(self.history_path)), multiline=True, auto_suggest=AutoSuggestFromHistory(), key_bindings=bindings)
+        
+        @bindings.add("c-r")
+        def _(event):
+            """Start reverse history search."""
+            from prompt_toolkit.key_binding.bindings.search import start_reverse_search
+            start_reverse_search(event.current_buffer)
+        
+        @bindings.add("c-c")
+        def _(event):
+            """Cancel input."""
+            event.current_buffer.reset()
+        
+        @bindings.add("c-a")
+        def _(event):
+            """Move cursor to the beginning of the line."""
+            event.current_buffer.cursor_position = 0
+        
+        @bindings.add("c-e")
+        def _(event):
+            """Move cursor to the end of the line."""
+            event.current_buffer.cursor_position = len(event.current_buffer.text)
+        
+        @bindings.add("c-k")
+        def _(event):
+            """Delete from cursor to the end of the line."""
+            event.current_buffer.text = event.current_buffer.text[:event.current_buffer.cursor_position]
+        
+        self.prompt_session = PromptSession(
+            history=FileHistory(str(self.history_path)), 
+            multiline=True, 
+            auto_suggest=AutoSuggestFromHistory(), 
+            key_bindings=bindings,
+            complete_while_typing=True,
+            enable_history_search=True
+        )
         self.style = Style.from_dict({'bottom-toolbar': '#ffffff bg:#333333'})
         self._completer = None
         self._completer_last_updated = 0
@@ -147,6 +184,8 @@ default_prompt = "default"
 openai_api_key = ""
 openrouter_api_key = ""
 gemini_api_key = ""
+anthropic_api_key = ""
+mistral_api_key = ""
 """
             with open(self.config_path, "w", encoding="utf-8") as f: f.write(default_config.strip() + "\n")
             self.console.print(f"[bold green]✓ Main config created at: {self.config_path}[/bold green]")
@@ -268,6 +307,10 @@ prompt = """You are a multilingual translator. Your task is to translate the use
   [cyan]/model <name>[/cyan]          Switch AI model.
   [cyan]/prompt <action>[/cyan]        Manage system prompts: [dim]list, view, <name>[/dim].
   [cyan]/session new[/cyan]           Start a new chat session with the default prompt.
+  [cyan]/session save <name>[/cyan]      Save the current session with a name.
+  [cyan]/session load <name>[/cyan]      Load a previously saved session.
+  [cyan]/session list[/cyan]          List all saved sessions.
+  [cyan]/file upload <path>[/cyan]     Upload and process a file. Supported formats: txt, md, json, csv, py, js, html, css, pdf.
   [cyan]/export <format>[/cyan]       Export session: [dim]md, json, html, md-rendered[/dim].
   [cyan]/clear[/cyan]                 Clear the terminal screen.
   [cyan]/exit[/cyan]                  Exit the application.
@@ -294,9 +337,104 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         else: self.console.print(f"[bold red]Error: Provider for '{new_model}' not found.[/bold red]")
 
     async def _handle_session_command(self, args: List[str]):
-        if not args or args[0] != 'new': self.console.print("[yellow]Usage: /session new[/yellow]"); return
-        self._apply_prompt(self.default_prompt_name)
-        self.console.print(f"[bold green]✓ New session started with default prompt '{self.default_prompt_name}'.[/bold green]")
+        if not args:
+            self.console.print("[yellow]Usage: /session new|save|load|list[/yellow]"); return
+        
+        if args[0] == 'new':
+            self._apply_prompt(self.default_prompt_name)
+            self.console.print(f"[bold green]✓ New session started with default prompt '{self.default_prompt_name}'.[/bold green]")
+        elif args[0] == 'save':
+            if len(args) < 2:
+                self.console.print("[yellow]Usage: /session save <name>[/yellow]"); return
+            session_name = args[1]
+            session_file = self.sessions_dir / f"{session_name}.json"
+            try:
+                with open(session_file, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "messages": self.session_messages,
+                        "cost": self.session_cost,
+                        "prompt": self.active_prompt_name,
+                        "model": self.current_model
+                    }, f, ensure_ascii=False, indent=2)
+                self.console.print(f"[bold green]✓ Session saved as '{session_name}'.[/bold green]")
+            except Exception as e:
+                self.console.print(f"[bold red]Error saving session: {e}[/bold red]")
+        elif args[0] == 'load':
+            if len(args) < 2:
+                self.console.print("[yellow]Usage: /session load <name>[/yellow]"); return
+            session_name = args[1]
+            session_file = self.sessions_dir / f"{session_name}.json"
+            try:
+                with open(session_file, "r", encoding="utf-8") as f:
+                    session_data = json.load(f)
+                self.session_messages = session_data.get("messages", [])
+                self.session_cost = session_data.get("cost", 0.0)
+                self.active_prompt_name = session_data.get("prompt", self.default_prompt_name)
+                self.current_model = session_data.get("model", self.current_model)
+                self.console.print(f"[bold green]✓ Session '{session_name}' loaded successfully.[/bold green]")
+            except FileNotFoundError:
+                self.console.print(f"[bold red]Session '{session_name}' not found.[/bold red]")
+            except Exception as e:
+                self.console.print(f"[bold red]Error loading session: {e}[/bold red]")
+        elif args[0] == 'list':
+            try:
+                sessions = [f.stem for f in self.sessions_dir.glob("*.json")]
+                if sessions:
+                    self.console.print("[bold]Saved sessions:[/bold]")
+                    for session in sessions:
+                        self.console.print(f"  - {session}")
+                else:
+                    self.console.print("[yellow]No saved sessions found.[/yellow]")
+            except Exception as e:
+                self.console.print(f"[bold red]Error listing sessions: {e}[/bold red]")
+        else:
+            self.console.print("[yellow]Usage: /session new|save|load|list[/yellow]")
+        
+    async def _handle_file_command(self, args: List[str]):
+        if not args:
+            self.console.print("[yellow]Usage: /file upload <path>[/yellow]"); return
+        
+        if args[0] == 'upload':
+            if len(args) < 2:
+                self.console.print("[yellow]Usage: /file upload <path>[/yellow]"); return
+            file_path = args[1]
+            try:
+                file = Path(file_path)
+                if not file.exists() or not file.is_file():
+                    self.console.print(f"[bold red]Error: File '{file_path}' not found.[/bold red]"); return
+                
+                file_size = file.stat().st_size
+                if file_size > 10 * 1024 * 1024:  # 10MB limit
+                    self.console.print("[bold red]Error: File size exceeds 10MB limit.[/bold red]"); return
+                
+                # Read file content based on extension
+                extension = file.suffix.lower()
+                if extension in ['.txt', '.md', '.json', '.csv', '.py', '.js', '.html', '.css']:
+                    with open(file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    # Add file content to chat context
+                    file_info = f"[File: {file.name}]\n\n{content}"
+                    self.session_messages.append({"role": "user", "content": file_info})
+                    self.console.print(f"[bold green]✓ File '{file.name}' uploaded and added to chat context.[/bold green]")
+                elif extension in ['.pdf']:
+                    try:
+                        import PyPDF2
+                        with open(file, 'rb') as f:
+                            reader = PyPDF2.PdfReader(f)
+                            content = "\n".join([page.extract_text() for page in reader.pages])
+                        file_info = f"[PDF File: {file.name}]\n\n{content}"
+                        self.session_messages.append({"role": "user", "content": file_info})
+                        self.console.print(f"[bold green]✓ PDF file '{file.name}' uploaded and added to chat context.[/bold green]")
+                    except ImportError:
+                        self.console.print("[bold red]Error: PyPDF2 is not installed. Please install it with 'pip install PyPDF2'.[/bold red]")
+                    except Exception as e:
+                        self.console.print(f"[bold red]Error reading PDF file: {e}[/bold red]")
+                else:
+                    self.console.print(f"[bold red]Error: Unsupported file format '{extension}'.[/bold red]")
+            except Exception as e:
+                self.console.print(f"[bold red]Error uploading file: {e}[/bold red]")
+        else:
+            self.console.print("[yellow]Usage: /file upload <path>[/yellow]")
         
     async def _handle_export_command(self, args: List[str]):
         if not args: self.console.print("[yellow]Usage: /export <md|json|html|md-rendered>[/yellow]"); return
@@ -490,6 +628,8 @@ class ProviderFactory:
         if key := cfg.get("openai_api_key"): self.providers["openai"] = OpenAIProvider(key, "https://api.openai.com/v1")
         if key := cfg.get("openrouter_api_key"): self.providers["openrouter"] = OpenAIProvider(key, "https://openrouter.ai/api/v1", "openrouter")
         if key := cfg.get("gemini_api_key"): self.providers["gemini"] = GeminiProvider(key)
+        if key := cfg.get("anthropic_api_key"): self.providers["anthropic"] = OpenAIProvider(key, "https://api.anthropic.com/v1", "anthropic")
+        if key := cfg.get("mistral_api_key"): self.providers["mistral"] = OpenAIProvider(key, "https://api.mistral.ai/v1", "mistral")
     def get_provider(self, model_id: str) -> Optional[AIProvider]: return self.providers.get(model_id.split('/')[0])
     def get_available_providers(self) -> List[str]: return list(self.providers.keys())
 

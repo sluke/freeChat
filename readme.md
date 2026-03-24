@@ -123,6 +123,10 @@ FreeChat now supports exporting sessions with rendered Markdown content. When yo
 | | `view` | View the full content of the currently used system prompt. |
 | | `<name>` | Switch to the specified system prompt and automatically start a new session. Example: `/prompt coder`. |
 | `/session`| `new` | Start a completely new chat session with the default system prompt applied. |
+| | `save <name>` | Save the current session with a name. |
+| | `load <name>` | Load a previously saved session. |
+| | `list` | List all saved sessions. |
+| `/file` | `upload <path>` | Upload and process a file. Supported formats: txt, md, json, csv, py, js, html, css, pdf. |
 | `/export` | `<format>` | Export the current session to a file in the specified format. Supported formats: `md`, `json`, `html`, `md-rendered`. |
 | `/clear` | (none) | Clear the current terminal screen. |
 | `/exit` | (none) | Exit the FreeChat application. |
@@ -159,6 +163,12 @@ openrouter_api_key = ""
 
 # Google Gemini: https://aistudio.google.com/app/apikey
 gemini_api_key = ""
+
+# Anthropic: https://console.anthropic.com/settings/keys
+anthropic_api_key = ""
+
+# Mistral: https://console.mistral.ai/api-keys
+mistral_api_key = ""
 ```
 
 ### 2. System Prompts File: `prompts.toml`

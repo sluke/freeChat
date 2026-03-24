@@ -123,6 +123,10 @@ FreeChat 现在支持导出带有渲染 Markdown 内容的会话。当您使用 
 | | `view` | 查看当前正在使用的系统提示的完整内容。|
 | | `<name>` | 切换到指定的系统提示，并自动开始一个新会话。例如: `/prompt coder`。|
 | `/session`| `new` | 开始一个全新的聊天会话，并应用默认的系统提示。|
+| | `save <name>` | 以指定名称保存当前会话。 |
+| | `load <name>` | 加载之前保存的会话。 |
+| | `list` | 列出所有已保存的会话。 |
+| `/file` | `upload <path>` | 上传并处理文件。支持的格式: txt, md, json, csv, py, js, html, css, pdf。 |
 | `/export` | `<format>` | 将当前会话导出为指定格式的文件。支持的格式: `md`, `json`, `html`, `md-rendered`。 |
 | `/clear` | (无) | 清空当前终端屏幕。 |
 | `/exit` | (无) | 退出 FreeChat 应用。 |
@@ -159,6 +163,12 @@ openrouter_api_key = ""
 
 # Google Gemini: https://aistudio.google.com/app/apikey
 gemini_api_key = ""
+
+# Anthropic: https://console.anthropic.com/settings/keys
+anthropic_api_key = ""
+
+# Mistral: https://console.mistral.ai/api-keys
+mistral_api_key = ""
 ```
 
 ### 2. 系统提示文件: `prompts.toml`
