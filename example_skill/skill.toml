@@ -1,0 +1,21 @@
+[skill]
+name = "example-skill"
+version = "1.0.0"
+description = "An example skill demonstrating the FreeChat skill system"
+author = "FreeChat Team"
+entry_point = "main:initialize"
+dependencies = []
+
+[[tools]]
+name = "example_hello"
+description = "Returns a greeting message"
+parameters = [
+    { name = "name", type = "string", required = true, description = "Name to greet" }
+]
+
+[[tools]]
+name = "example_count"
+description = "Count words in a text"
+parameters = [
+    { name = "text", type = "string", required = true, description = "Text to count words in" }
+]

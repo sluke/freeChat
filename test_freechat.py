@@ -28,7 +28,7 @@ class TestFreeChatApp(unittest.TestCase):
         # Create a minimal config file
         config_content = """
 [general]
-default_model = "openrouter/stepfun/step-3.5-flash:free"
+default_model = "openrouter/openrouter/free"
 default_prompt = "default"
 [providers]
 openrouter_api_key = "test_key"
@@ -53,7 +53,7 @@ prompt = "You are a test assistant"
                         self.app = FreeChatApp()
                         # Manually set up some attributes for testing
                 self.app.active_prompt_name = "default"
-                self.app.current_model = "openrouter/stepfun/step-3.5-flash:free"
+                self.app.current_model = "openrouter/free"
                 self.app.MAX_HISTORY_MESSAGES = 50
                 self.app.session_messages = []
                 from collections import OrderedDict
@@ -71,7 +71,7 @@ prompt = "You are a test assistant"
         """Test initialization"""
         self.assertIsInstance(self.app, FreeChatApp)
         self.assertEqual(self.app.active_prompt_name, "default")
-        self.assertEqual(self.app.current_model, "openrouter/stepfun/step-3.5-flash:free")
+        self.assertEqual(self.app.current_model, "openrouter/free")
     
     def test_count_tokens(self):
         """Test token counting"""
@@ -165,7 +165,7 @@ prompt = "You are a test assistant"
             # Create a minimal config file without these keys
             config_content = """
 [general]
-default_model = "openrouter/stepfun/step-3.5-flash:free"
+default_model = "openrouter/openrouter/free"
 [providers]
 openrouter_api_key = "test_key"
 """
@@ -196,7 +196,7 @@ openrouter_api_key = "test_key"
             # Create a config file with empty openai_api_key
             config_content = """
 [general]
-default_model = "openrouter/stepfun/step-3.5-flash:free"
+default_model = "openrouter/openrouter/free"
 [providers]
 openai_api_key = ""
 openrouter_api_key = "test_key"
@@ -227,7 +227,7 @@ openrouter_api_key = "test_key"
             # Create a config file with env override disabled
             config_content = """
 [general]
-default_model = "openrouter/stepfun/step-3.5-flash:free"
+default_model = "openrouter/openrouter/free"
 allow_env_override = false
 [providers]
 openai_api_key = "config_openai_key"
@@ -347,6 +347,433 @@ class TestProviderFactory(unittest.TestCase):
         # Test non-existent provider
         provider = factory.get_provider("non_existent/model")
         self.assertIsNone(provider)
+
+
+class TestMemoryEntry(unittest.TestCase):
+    """Test MemoryEntry class"""
+
+    def test_memory_entry_creation(self):
+        """Test creating a MemoryEntry"""
+        from freechat import MemoryEntry
+        entry = MemoryEntry(
+            id="mem_test_001",
+            content="Test memory content",
+            category="preferences",
+            source="user",
+            created_at=1000.0,
+            updated_at=1000.0,
+            importance=8,
+            tags=["test", "preference"],
+            branch=None,
+            compressed=False,
+            original_length=23
+        )
+        self.assertEqual(entry.id, "mem_test_001")
+        self.assertEqual(entry.content, "Test memory content")
+        self.assertEqual(entry.category, "preferences")
+        self.assertEqual(entry.importance, 8)
+        self.assertEqual(len(entry.tags), 2)
+
+    def test_compute_value_score(self):
+        """Test value score computation"""
+        from freechat import MemoryEntry
+        import time
+        current_time = time.time()
+        entry = MemoryEntry(
+            id="mem_test_002",
+            content="Recent important memory",
+            category="knowledge",
+            source="user",
+            created_at=current_time - 86400,  # 1 day ago
+            updated_at=current_time - 86400,
+            access_count=5,
+            last_accessed=current_time - 3600,  # 1 hour ago
+            importance=9,
+            tags=["important", "knowledge", "ai"],
+            branch=None,
+            compressed=False,
+            original_length=25
+        )
+        score = entry.compute_value_score()
+        self.assertGreater(score, 0.0)
+        self.assertLessEqual(score, 1.0)
+        self.assertGreater(entry.value_score, 0.0)
+
+
+class TestAuctionEngine(unittest.TestCase):
+    """Test AuctionEngine class"""
+
+    def test_auction_engine_creation(self):
+        """Test creating an AuctionEngine"""
+        from freechat import AuctionEngine
+        engine = AuctionEngine()
+        self.assertIsNotNone(engine.weights)
+        self.assertIn('importance', engine.weights)
+        self.assertIn('relevance', engine.weights)
+        self.assertIn('recency', engine.weights)
+        self.assertIn('frequency', engine.weights)
+
+    def test_custom_weights(self):
+        """Test AuctionEngine with custom weights"""
+        from freechat import AuctionEngine
+        custom_weights = {
+            'importance': 0.5,
+            'relevance': 0.3,
+            'recency': 0.1,
+            'frequency': 0.1
+        }
+        engine = AuctionEngine(weights=custom_weights)
+        self.assertEqual(engine.weights['importance'], 0.5)
+
+    def test_run_auction(self):
+        """Test running an auction"""
+        from freechat import AuctionEngine, MemoryEntry
+        import time
+        engine = AuctionEngine()
+        current_time = time.time()
+        entries = [
+            MemoryEntry(
+                id=f"mem_{i}",
+                content=f"Memory {i}",
+                category="test",
+                source="user",
+                created_at=current_time - i * 86400,
+                updated_at=current_time - i * 86400,
+                importance=10 - i,
+                tags=["test"],
+                branch=None,
+                compressed=False,
+                original_length=10
+            )
+            for i in range(5)
+        ]
+        keep, compress = engine.run_auction(entries, max_keep=3)
+        self.assertEqual(len(keep), 3)
+        self.assertEqual(len(compress), 2)
+
+
+class TestMemoryManager(unittest.TestCase):
+    """Test MemoryManager class"""
+
+    def setUp(self):
+        """Set up test environment"""
+        import tempfile
+        from freechat import MemoryManager
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test_memory.db"
+        self.memory_manager = MemoryManager(self.db_path)
+
+    def tearDown(self):
+        """Clean up test environment"""
+        import shutil
+        self.memory_manager.close()
+        if self.temp_dir:
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_remember(self):
+        """Test storing a memory"""
+        memory_id = self.memory_manager.remember(
+            content="Test memory content",
+            category="test",
+            importance=7,
+            tags=["test", "memory"]
+        )
+        self.assertIsNotNone(memory_id)
+        self.assertTrue(len(memory_id) > 0)
+
+    def test_recall(self):
+        """Test recalling memories"""
+        # Store a memory first
+        self.memory_manager.remember(
+            content="Python is a great programming language",
+            category="knowledge",
+            importance=8,
+            tags=["python", "programming"]
+        )
+        # Search for it
+        results = self.memory_manager.recall("Python programming", limit=5)
+        self.assertIsInstance(results, list)
+
+    def test_forget(self):
+        """Test forgetting a memory"""
+        # Store and then forget
+        memory_id = self.memory_manager.remember(
+            content="Temporary memory",
+            category="test"
+        )
+        result = self.memory_manager.forget(memory_id)
+        self.assertTrue(result)
+
+    def test_get_stats(self):
+        """Test getting memory statistics"""
+        # Add some memories
+        for i in range(3):
+            self.memory_manager.remember(
+                content=f"Test memory {i}",
+                category="test",
+                importance=5
+            )
+        stats = self.memory_manager.get_stats()
+        self.assertIsInstance(stats, dict)
+        self.assertIn('total_memories', stats)
+
+
+class TestBranchMemoryManager(unittest.TestCase):
+    """Test BranchMemoryManager class"""
+
+    def setUp(self):
+        """Set up test environment"""
+        import tempfile
+        from freechat import MemoryManager, BranchMemoryManager
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test_branch.db"
+        self.memory_manager = MemoryManager(self.db_path)
+        self.branch_manager = BranchMemoryManager(self.memory_manager)
+
+    def tearDown(self):
+        """Clean up test environment"""
+        import shutil
+        self.branch_manager = None
+        self.memory_manager.close()
+        if self.temp_dir:
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_detect_git_repo(self):
+        """Test detecting git repository"""
+        result = self.branch_manager._detect_git_repo()
+        # Should return None or a Path
+        self.assertTrue(result is None or isinstance(result, Path))
+
+    def test_get_current_branch(self):
+        """Test getting current git branch"""
+        branch = self.branch_manager.get_current_branch()
+        # Should return None or a string
+        self.assertTrue(branch is None or isinstance(branch, str))
+
+    def test_list_branches_with_memories(self):
+        """Test listing branches with memories"""
+        # Add a branch-specific memory
+        self.memory_manager.remember(
+            content="Feature branch memory",
+            category="context",
+            branch="feature/test"
+        )
+        branches = self.branch_manager.list_branches_with_memories()
+        self.assertIsInstance(branches, list)
+
+
+class TestMemoryEntry(unittest.TestCase):
+    """Test MemoryEntry class"""
+
+    def test_memory_entry_creation(self):
+        """Test creating a MemoryEntry"""
+        from freechat import MemoryEntry
+        entry = MemoryEntry(
+            id="mem_test_001",
+            content="Test memory content",
+            category="preferences",
+            source="user",
+            created_at=1000.0,
+            updated_at=1000.0,
+            importance=8,
+            tags=["test", "preference"],
+            branch=None,
+            compressed=False,
+            original_length=23
+        )
+        self.assertEqual(entry.id, "mem_test_001")
+        self.assertEqual(entry.content, "Test memory content")
+        self.assertEqual(entry.category, "preferences")
+        self.assertEqual(entry.importance, 8)
+        self.assertEqual(len(entry.tags), 2)
+
+    def test_compute_value_score(self):
+        """Test value score computation"""
+        from freechat import MemoryEntry
+        import time
+        current_time = time.time()
+        entry = MemoryEntry(
+            id="mem_test_002",
+            content="Recent important memory",
+            category="knowledge",
+            source="user",
+            created_at=current_time - 86400,  # 1 day ago
+            updated_at=current_time - 86400,
+            access_count=5,
+            last_accessed=current_time - 3600,  # 1 hour ago
+            importance=9,
+            tags=["important", "knowledge", "ai"],
+            branch=None,
+            compressed=False,
+            original_length=25
+        )
+        score = entry.compute_value_score()
+        self.assertGreater(score, 0.0)
+        self.assertLessEqual(score, 1.0)
+        self.assertGreater(entry.value_score, 0.0)
+
+
+class TestAuctionEngine(unittest.TestCase):
+    """Test AuctionEngine class"""
+
+    def test_auction_engine_creation(self):
+        """Test creating an AuctionEngine"""
+        from freechat import AuctionEngine
+        engine = AuctionEngine()
+        self.assertIsNotNone(engine.weights)
+        self.assertIn('importance', engine.weights)
+        self.assertIn('relevance', engine.weights)
+        self.assertIn('recency', engine.weights)
+        self.assertIn('frequency', engine.weights)
+
+    def test_custom_weights(self):
+        """Test AuctionEngine with custom weights"""
+        from freechat import AuctionEngine
+        custom_weights = {
+            'importance': 0.5,
+            'relevance': 0.3,
+            'recency': 0.1,
+            'frequency': 0.1
+        }
+        engine = AuctionEngine(weights=custom_weights)
+        self.assertEqual(engine.weights['importance'], 0.5)
+
+    def test_run_auction(self):
+        """Test running an auction"""
+        from freechat import AuctionEngine, MemoryEntry
+        import time
+        engine = AuctionEngine()
+        current_time = time.time()
+        entries = [
+            MemoryEntry(
+                id=f"mem_{i}",
+                content=f"Memory {i}",
+                category="test",
+                source="user",
+                created_at=current_time - i * 86400,
+                updated_at=current_time - i * 86400,
+                importance=10 - i,
+                tags=["test"],
+                branch=None,
+                compressed=False,
+                original_length=10
+            )
+            for i in range(5)
+        ]
+        keep, compress = engine.run_auction(entries, max_keep=3)
+        self.assertEqual(len(keep), 3)
+        self.assertEqual(len(compress), 2)
+
+
+class TestMemoryManager(unittest.TestCase):
+    """Test MemoryManager class"""
+
+    def setUp(self):
+        """Set up test environment"""
+        import tempfile
+        from freechat import MemoryManager
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test_memory.db"
+        self.memory_manager = MemoryManager(self.db_path)
+
+    def tearDown(self):
+        """Clean up test environment"""
+        import shutil
+        self.memory_manager.close()
+        if self.temp_dir:
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_remember(self):
+        """Test storing a memory"""
+        memory_id = self.memory_manager.remember(
+            content="Test memory content",
+            category="context",
+            importance=7,
+            tags=["test", "memory"]
+        )
+        self.assertIsNotNone(memory_id)
+        self.assertTrue(len(memory_id) > 0)
+
+    def test_recall(self):
+        """Test recalling memories"""
+        # Store a memory first
+        self.memory_manager.remember(
+            content="Python is a great programming language",
+            category="knowledge",
+            importance=8,
+            tags=["python", "programming"]
+        )
+        # Search for it
+        results = self.memory_manager.recall("Python programming", limit=5)
+        self.assertIsInstance(results, list)
+
+    def test_forget(self):
+        """Test forgetting a memory"""
+        # Store and then forget
+        memory_id = self.memory_manager.remember(
+            content="Temporary memory",
+            category="test"
+        )
+        result = self.memory_manager.forget(memory_id)
+        self.assertTrue(result)
+
+    def test_get_stats(self):
+        """Test getting memory statistics"""
+        # Add some memories
+        for i in range(3):
+            self.memory_manager.remember(
+                content=f"Test memory {i}",
+                category="test",
+                importance=5
+            )
+        stats = self.memory_manager.get_stats()
+        self.assertIsInstance(stats, dict)
+        self.assertIn('total_memories', stats)
+
+
+class TestBranchMemoryManager(unittest.TestCase):
+    """Test BranchMemoryManager class"""
+
+    def setUp(self):
+        """Set up test environment"""
+        import tempfile
+        from freechat import MemoryManager, BranchMemoryManager
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test_branch.db"
+        self.memory_manager = MemoryManager(self.db_path)
+        self.branch_manager = BranchMemoryManager(self.memory_manager)
+
+    def tearDown(self):
+        """Clean up test environment"""
+        import shutil
+        self.branch_manager = None
+        self.memory_manager.close()
+        if self.temp_dir:
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_detect_git_repo(self):
+        """Test detecting git repository"""
+        result = self.branch_manager._detect_git_repo()
+        # Should return None or a Path
+        self.assertTrue(result is None or isinstance(result, Path))
+
+    def test_get_current_branch(self):
+        """Test getting current git branch"""
+        branch = self.branch_manager.get_current_branch()
+        # Should return None or a string
+        self.assertTrue(branch is None or isinstance(branch, str))
+
+    def test_list_branches_with_memories(self):
+        """Test listing branches with memories"""
+        # Add a branch-specific memory
+        self.memory_manager.remember(
+            content="Feature branch memory",
+            category="context",
+            branch="feature/test"
+        )
+        branches = self.branch_manager.list_branches_with_memories()
+        self.assertIsInstance(branches, list)
+
 
 if __name__ == '__main__':
     unittest.main()

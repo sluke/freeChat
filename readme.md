@@ -1,6 +1,6 @@
 # FreeChat 💬
 
-**Your all-in-one, portable terminal AI chat tool - v2.2.5 with Performance Optimizations**
+**Your all-in-one, portable terminal AI chat tool - v2.3.0 with Memory System & Performance Optimizations**
 
 `FreeChat` is a powerful, easy-to-deploy single-file AI chat command line tool, designed specifically for use on cloud VPS. After connecting via SSH, it provides you with a feature-rich and responsive chat interface that integrates multiple mainstream AI providers (such as OpenRouter, OpenAI, Gemini).
 
@@ -19,6 +19,7 @@
 *   ⌨️ **Modern Shortcuts**: Use `Control + Enter` to submit multi-line input, conforming to modern application habits.
 *   💾 **Session Management and Export**: Supports creating, saving, and loading chat sessions, with the ability to easily export session records in Markdown, JSON, or HTML formats.
 *   🎨 **Markdown Rendering Support**: Export sessions with beautifully rendered Markdown content in HTML format using the new `md-rendered` export option.
+*   🧠 **Memory System with Auction Compression**: Advanced long-term memory with automatic value-based compression using auction algorithms. Supports global and Git branch-specific memories with SQLite storage and full-text search.
 *   ⚡ **Performance Optimizations**: Includes connection pooling, model caching, token counting optimization, and memory management for faster response times and reduced resource usage.
 
 ## 🚀 Installation and Setup
@@ -131,6 +132,13 @@ FreeChat now supports exporting sessions with rendered Markdown content. When yo
 | `/export` | `<format>` | Export the current session to a file in the specified format. Supported formats: `md`, `json`, `html`, `md-rendered`. |
 | `/clear` | (none) | Clear the current terminal screen. |
 | `/exit` | (none) | Exit the FreeChat application. |
+| `/memory` | `remember <text>` | Store a new memory with automatic categorization. |
+| | `recall <query>` | Search memories using full-text search. |
+| | `list [branch]` | List all memories with value scores and access counts. |
+| | `forget <id>` | Delete a specific memory by ID. |
+| | `compress` | Run auction-based compression to archive low-value memories. |
+| | `stats` | Display memory statistics including total, active, and archived counts. |
+| | `branch <name>` | Show memories specific to a Git branch. |
 
 ---
 
@@ -148,7 +156,7 @@ This file stores your API keys and general settings.
 [general]
 # Set the model to load by default at startup.
 # Format is "provider_name/model_identifier".
-default_model = "openrouter/stepfun/step-3.5-flash:free"
+default_model = "openrouter/openrouter/free"
 
 # Set the system prompt name to load by default at startup. This name corresponds to an entry in prompts.toml.
 default_prompt = "default"
@@ -267,4 +275,4 @@ FreeChat can be installed as a system service using systemd.
 
 ## 📄 License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [GNU General Public License v3.0](LICENSE).

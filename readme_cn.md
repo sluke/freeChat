@@ -1,6 +1,6 @@
 # FreeChat 💬
 
-**您的全功能、便携式终端 AI 聊天利器 - v2.2.5 性能优化版**
+**您的全功能、便携式终端 AI 聊天利器 - v2.3.0 记忆系统与性能优化版**
 
 `FreeChat` 是一个功能强大、部署简单的单文件 AI 聊天命令行工具，专为在云端 VPS 上使用而设计。通过 SSH 连接后，它为您提供一个集成了多个主流 AI 提供商（如 OpenRouter, OpenAI, Gemini）的、功能丰富且响应迅速的聊天界面。
 
@@ -19,6 +19,7 @@
 *   ⌨️ **现代快捷键**: 使用 `Control + Enter` 提交多行输入，符合现代应用习惯。
 *   💾 **会话管理与导出**: 支持新建、保存和加载聊天会話，并可轻松将会话记录导出为 Markdown, JSON 或 HTML 格式。
 *   🎨 **Markdown 渲染支持**: 使用新的 `md-rendered` 导出选项，以美观的格式导出带有渲染 Markdown 内容的会话。
+*   🧠 **智能记忆系统与拍卖压缩**: 先进的长期记忆功能，基于价值评估的自动压缩算法。支持全局记忆和 Git 分支特定记忆，使用 SQLite 存储并提供全文搜索能力。
 *   ⚡ **性能优化**: 包含连接池、模型缓存、令牌计数优化和内存管理，提供更快的响应速度和更低的资源消耗。
 
 ## 🚀 安装与设置
@@ -54,6 +55,72 @@
     ```bash
     python3 freechat.py
     ```
+
+---
+
+## 🧠 记忆系统
+
+FreeChat 包含一个强大的记忆系统，支持跨会话的长期上下文保持。该系统使用 SQLite 进行高效存储，并提供全文搜索能力，同时实现了基于智能拍卖算法的压缩机制来管理存储限制。
+
+### 核心特性
+
+- **全局与分支特定记忆**：支持全局记忆存储，或将记忆与特定 Git 分支关联，实现上下文感知的分支切换
+- **自动价值评分**：基于重要性、相关性、时效性和访问频率为每个记忆计算综合分数
+- **拍卖压缩机制**：当达到存储限制时，自动压缩或归档低价值记忆
+- **全文搜索**：基于 SQLite FTS5 的快速记忆检索
+- **Git 集成**：自动检测 Git 分支切换，加载对应的分支特定记忆
+
+### 记忆命令
+
+```bash
+# 存储新记忆
+> /memory remember "用户喜欢 Python 胜过 JavaScript"
+✓ 已记录 (mem_abc123)
+
+# 搜索记忆
+> /memory recall "编程偏好"
+[显示匹配的记忆]
+
+# 列出所有记忆（含分数）
+> /memory list
+ID       类别       内容                           分数    访问
+mem_abc  偏好       用户喜欢深色模式界面            0.85     5
+...
+
+# 运行拍卖压缩
+> /memory compress
+✓ 已压缩 15 条记忆（归档低价值记忆）
+
+# 查看统计信息
+> /memory stats
+记忆总数: 42
+活跃: 37 | 归档: 5
+平均分数: 0.72
+
+# 显示分支特定记忆
+> /memory branch feature/new-ui
+[显示 feature/new-ui 分支的记忆]
+```
+
+### 存储
+
+记忆存储在 SQLite 数据库中，位于 `~/.config/freechat/memories/memories.db`（便携模式下为 `freechat_config/memories/memories.db`）。数据库包括：
+
+- 主 `memories` 表，带全文搜索索引
+- `memory_tags` 表用于标签管理
+- FTS5 虚拟表用于高效内容搜索
+- 自动触发器保持搜索索引同步
+
+### 拍卖算法
+
+基于拍卖的压缩使用加权评分：
+
+- **重要性** (40%)：用户指定的重要性 (1-10)
+- **相关性** (30%)：基于标签丰富度
+- **时效性** (20%)：随时间指数衰减（半衰期30天）
+- **频率** (10%)：归一化访问次数
+
+低于存储限制阈值的记忆会被压缩或归档，以保持最佳记忆性能。
 
 ---
 
@@ -131,6 +198,13 @@ FreeChat 现在支持导出带有渲染 Markdown 内容的会话。当您使用 
 | `/export` | `<format>` | 将当前会话导出为指定格式的文件。支持的格式: `md`, `json`, `html`, `md-rendered`。 |
 | `/clear` | (无) | 清空当前终端屏幕。 |
 | `/exit` | (无) | 退出 FreeChat 应用。 |
+| `/memory` | `remember <text>` | 存储新记忆，自动分类。 |
+| | `recall <query>` | 使用全文搜索查找记忆。 |
+| | `list [branch]` | 列出所有记忆，显示价值分数和访问次数。 |
+| | `forget <id>` | 删除指定 ID 的记忆。 |
+| | `compress` | 运行基于拍卖算法的压缩，归档低价值记忆。 |
+| | `stats` | 显示记忆统计信息，包括总数、活跃数和归档数。 |
+| | `branch <name>` | 显示特定 Git 分支的记忆。 |
 
 ---
 
@@ -148,7 +222,7 @@ FreeChat 现在支持导出带有渲染 Markdown 内容的会话。当您使用 
 [general]
 # 设置启动时默认加载的模型。
 # 格式为 "provider_name/model_identifier"。
-default_model = "openrouter/stepfun/step-3.5-flash:free"
+default_model = "openrouter/openrouter/free"
 
 # 设置启动时默认加载的系统提示名称，该名称对应 prompts.toml 中的一项。
 default_prompt = "default"
@@ -267,4 +341,4 @@ FreeChat 可以使用 systemd 安装为系统服务。
 
 ## 📄 许可证
 
-本项目采用 [MIT License](LICENSE) 授权。
+本项目采用 [GNU General Public License v3.0](LICENSE) 授权。
