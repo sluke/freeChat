@@ -58,6 +58,72 @@
 
 ---
 
+## 🧠 Memory System
+
+FreeChat includes an advanced memory system for long-term context preservation across sessions. This system uses SQLite for efficient storage with full-text search capabilities and implements intelligent auction-based compression to manage storage limits.
+
+### Core Features
+
+- **Global and Branch-Specific Memories**: Support global memory storage or associate memories with specific Git branches for context-aware branch switching
+- **Automatic Value Scoring**: Calculates comprehensive scores for each memory based on importance, relevance, recency, and access frequency
+- **Auction Compression Mechanism**: Automatically compresses or archives low-value memories when storage limits are reached
+- **Full-Text Search**: Fast memory retrieval based on SQLite FTS5
+- **Git Integration**: Automatic detection of Git branch switches to load corresponding branch-specific memories
+
+### Memory Commands
+
+```bash
+# Store a new memory
+> /memory remember "User prefers Python over JavaScript"
+✓ Recorded (mem_abc123)
+
+# Search memories
+> /memory recall "programming preferences"
+[Displays matching memories]
+
+# List all memories (with scores)
+> /memory list
+ID       Category    Content                           Score    Access
+mem_abc  preference  User prefers dark mode interface   0.85     5
+...
+
+# Run auction compression
+> /memory compress
+✓ Compressed 15 memories (archived low-value memories)
+
+# View statistics
+> /memory stats
+Total memories: 42
+Active: 37 | Archived: 5
+Average score: 0.72
+
+# Show branch-specific memories
+> /memory branch feature/new-ui
+[Displays memories for feature/new-ui branch]
+```
+
+### Storage
+
+Memories are stored in an SQLite database at `~/.config/freechat/memories/memories.db` (or `freechat_config/memories/memories.db` in portable mode). The database includes:
+
+- Main `memories` table with full-text search index
+- `memory_tags` table for tag management
+- FTS5 virtual table for efficient content search
+- Automatic triggers to keep search indexes synchronized
+
+### Auction Algorithm
+
+The auction-based compression uses weighted scoring:
+
+- **Importance** (40%): User-specified importance (1-10)
+- **Relevance** (30%): Based on tag richness
+- **Recency** (20%): Exponential decay (half-life 30 days)
+- **Frequency** (10%): Normalized access count
+
+Memories below the storage limit threshold are compressed or archived to maintain optimal memory performance.
+
+---
+
 ## 📁 Configuration File Address Management (Global vs. Portable)
 
 `FreeChat` supports two configuration modes that you can easily switch between **without modifying any code**.
@@ -110,7 +176,22 @@ mv ~/.config/freechat/* /path/to/your/script/freechat_config/
 *   **Using Commands**: All special functions are implemented through commands starting with a slash `/`. Type `/` and press the `Tab` key to view and autocomplete all available commands.
 *   **View Help**: Type `/help` at any time within the application to see the command list.
 
-### New Feature: Markdown Rendering Support
+### Memory System
+
+FreeChat includes an advanced memory system for long-term context preservation across sessions.
+
+**Memory Commands:**
+- `/memory remember <text>` - Store a new memory with automatic categorization
+- `/memory recall <query>` - Search memories using full-text search
+- `/memory list` - List all memories with value scores and access counts
+- `/memory forget <id>` - Delete a specific memory by ID
+- `/memory compress` - Run auction-based compression to archive low-value memories
+- `/memory stats` - Display memory statistics
+- `/memory branch <name>` - Show memories specific to a Git branch
+
+The memory system uses SQLite with FTS5 full-text search and implements an auction algorithm for intelligent compression based on importance, relevance, recency, and access frequency.
+
+### Markdown Rendering Support
 
 FreeChat now supports exporting sessions with rendered Markdown content. When you use the `/export md-rendered` command, it will generate an HTML file with properly formatted Markdown content, including bold text, italic text, code blocks, and other Markdown elements rendered in a visually appealing way.
 
