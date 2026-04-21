@@ -124,6 +124,149 @@ mem_abc  偏好       用户喜欢深色模式界面            0.85     5
 
 ---
 
+## 🛠️ 技能系统
+
+FreeChat 包含一个强大的技能系统，允许你通过安装技能包来扩展功能。技能可以提供自定义工具，供 AI 在回答问题时使用。
+
+### 什么是技能？
+
+技能是一个可复用的包，可以：
+- 定义带有参数和描述的工具
+- 提供元数据（名称、版本、作者、描述）
+- 支持独立安装、更新和删除
+- 与 AI 对话流程无缝集成
+
+### 技能包结构
+
+技能包是一个目录，包含：
+
+```
+my_skill/
+├── skill.toml          # 技能元数据（必需）
+└── README.md           # 说明文档（可选）
+```
+
+### 创建技能
+
+创建 `skill.toml` 文件：
+
+```toml
+[skill]
+name = "weather-skill"
+version = "1.0.0"
+description = "获取任意城市的天气信息"
+author = "你的名字"
+entry_point = "main:initialize"
+dependencies = []
+
+[[tools]]
+name = "get_weather"
+description = "获取城市的当前天气"
+parameters = [
+    { name = "city", type = "string", required = true, description = "城市名称" },
+    { name = "units", type = "string", required = false, description = "温度单位（celsius/fahrenheit）" }
+]
+```
+
+### 安装和使用技能
+
+#### 安装技能
+
+```bash
+> /skill install /path/to/your_skill
+✓ 技能 'weather-skill' v1.0.0 安装成功
+```
+
+你也可以从当前目录安装：
+```bash
+> /skill install .
+```
+
+#### 查看已安装技能
+
+```bash
+> /skill list
+名称          版本  描述                    工具数
+weather-skill 1.0.0  获取天气信息           1
+example-skill 1.0.0  示例技能               2
+```
+
+#### 查看技能信息
+
+```bash
+> /skill info weather-skill
+╭──────────────────── 技能信息 ─────────────────────╮
+│ weather-skill v1.0.0                              │
+│ 作者: 你的名字                                       │
+│ 描述: 获取任意城市的天气信息                        │
+│ 工具: get_weather                                  │
+╰──────────────────────────────────────────────────╯
+```
+
+#### 卸载技能
+
+```bash
+> /skill uninstall weather-skill
+✓ 技能 'weather-skill' 卸载成功
+```
+
+### 在对话中使用技能
+
+技能安装后，其工具会自动对 AI 可用。你不需要做任何特殊操作——只需自然地聊天：
+
+```bash
+> 北京今天天气怎么样？
+```
+
+AI 会自动检测到它需要天气信息，并调用 `get_weather` 工具，参数为 `{"city": "北京"}`。
+
+### 工作原理
+
+1. **你提问** - 使用自然语言
+2. **AI 分析** - 你的请求并判断是否需要工具
+3. **AI 调用工具** - 使用正确的参数
+4. **工具执行** - 并返回结果
+5. **AI 整合** - 结果到回答中
+
+### 创建有效技能的技巧
+
+1. **清晰的工具描述**：编写详细描述，让 AI 知道何时使用你的工具
+2. **有意义的参数名**：使用描述性名称如 `city` 而不是 `c`
+3. **必需 vs 可选**：将真正必需的参数标记为 `required = true`
+4. **好的示例**：在 README.md 中包含使用示例
+5. **版本管理**：更改时更新版本号
+
+### 示例：完整的天气技能工作流程
+
+```bash
+# 1. 创建技能目录
+mkdir ~/my_skills/weather_skill
+cd ~/my_skills/weather_skill
+
+# 2. 创建 skill.toml
+cat > skill.toml << 'EOF'
+[skill]
+name = "weather"
+version = "1.0.0"
+description = "获取城市的天气信息"
+author = "用户"
+
+[[tools]]
+name = "get_weather"
+description = "获取城市的当前天气"
+parameters = [
+    { name = "city", type = "string", required = true, description = "城市名称" }
+]
+EOF
+
+# 3. 在 FreeChat 中安装并使用
+> /skill install ~/my_skills/weather_skill
+> /skill list
+> 东京今天天气怎么样？
+```
+
+---
+
 ## 📁 配置文件地址管理 (全局 vs. 便携)
 
 `FreeChat` 支持两种配置模式，您**无需修改任何代码**即可轻松切换。

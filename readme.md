@@ -124,7 +124,86 @@ Memories below the storage limit threshold are compressed or archived to maintai
 
 ---
 
-## 📁 Configuration File Address Management (Global vs. Portable)
+## 🛠️ Skill System
+
+FreeChat includes a powerful Skill system that allows you to extend functionality through installable skill packages. Skills can provide custom tools that AI can use to help answer your questions.
+
+### Skill Package Structure
+
+A skill package is a directory containing:
+
+```
+my_skill/
+├── skill.toml          # Skill metadata (required)
+└── README.md           # Documentation (optional)
+```
+
+### Creating a Skill
+
+Create a `skill.toml` file:
+
+```toml
+[skill]
+name = "weather-skill"
+version = "1.0.0"
+description = "Get weather information for any city"
+author = "Your Name"
+entry_point = "main:initialize"
+dependencies = []
+
+[[tools]]
+name = "get_weather"
+description = "Get current weather for a city"
+parameters = [
+    { name = "city", type = "string", required = true, description = "City name" },
+    { name = "units", type = "string", required = false, description = "Temperature units (celsius/fahrenheit)" }
+]
+```
+
+### Skill Commands
+
+#### Install a Skill
+
+```bash
+> /skill install /path/to/your_skill
+✓ Skill 'weather-skill' v1.0.0 installed successfully
+```
+
+#### List Installed Skills
+
+```bash
+> /skill list
+Name          Version  Description                    Tools
+weather-skill 1.0.0    Get weather information        1
+example-skill 1.0.0    An example skill               2
+```
+
+#### View Skill Information
+
+```bash
+> /skill info weather-skill
+╭──────────────────── Skill Information ─────────────────────╮
+│ weather-skill v1.0.0                                        │
+│ Author: Your Name                                           │
+│ Description: Get weather information for any city           │
+│ Tools: get_weather                                          │
+╰─────────────────────────────────────────────────────────────╯
+```
+
+#### Uninstall a Skill
+
+```bash
+> /skill uninstall weather-skill
+✓ Skill 'weather-skill' uninstalled successfully
+```
+
+### Using Skills in Conversation
+
+Once a skill is installed, its tools are automatically available to the AI. You don't need to do anything special - just chat naturally:
+
+```bash
+> 北京今天天气怎么样？
+[AI will automatically use the get_weather tool with city=
 
 `FreeChat` supports two configuration modes that you can easily switch between **without modifying any code**.
 
@@ -220,6 +299,10 @@ FreeChat now supports exporting sessions with rendered Markdown content. When yo
 | | `compress` | Run auction-based compression to archive low-value memories. |
 | | `stats` | Display memory statistics including total, active, and archived counts. |
 | | `branch <name>` | Show memories specific to a Git branch. |
+| `/skill` | `list` | List all installed skills. |
+| | `install <path>` | Install a skill from a local directory. |
+| | `uninstall <name>` | Remove an installed skill. |
+| | `info <name>` | Display detailed information about a skill. |
 
 ---
 
