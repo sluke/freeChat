@@ -879,12 +879,20 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             else:
                 self.console.print(f"[bold red]Skill '{skill_name}' not found.[/bold red]")
 
+        elif args[0] == "registry":
+            await self._handle_registry_command(args[1:])
+
         else:
             self.console.print("[yellow]Usage:[/yellow]")
-            self.console.print("  /skill list                 - List installed skills")
-            self.console.print("  /skill install <path>       - Install skill from directory")
-            self.console.print("  /skill uninstall <name>     - Uninstall a skill")
-            self.console.print("  /skill info <name>          - Show skill information")
+            self.console.print("  /skill list                      - List installed skills")
+            self.console.print("  /skill install <path>            - Install skill from local directory")
+            self.console.print("  /skill install github:user/repo   - Install from GitHub")
+            self.console.print("  /skill install gitlab:user/repo   - Install from GitLab")
+            self.console.print("  /skill uninstall <name>          - Uninstall a skill")
+            self.console.print("  /skill info <name>               - Show skill information")
+            self.console.print("  /skill registry list             - List configured registries")
+            self.console.print("  /skill registry add <name> <url> - Add a custom registry")
+            self.console.print("  /skill registry use <name>       - Set default registry")
 
     async def _handle_memory_command(self, args: List[str]):
         """Handle /memory command for memory management."""
@@ -1991,6 +1999,162 @@ class BranchMemoryManager:
             return []
 
 
+@dataclass
+class RegistryConfig:
+    """Configuration for a skill registry."""
+    name: str
+    url: str
+    type: str = "git"  # "git" or "registry"
+
+
+class SkillRegistryClient:
+    """Client for managing skill registries and downloading skills."""
+
+    # Default registry configurations
+    DEFAULT_REGISTRIES = {
+        "github": RegistryConfig(
+            name="github",
+            url="https://github.com",
+            type="git"
+        ),
+        "gitlab": RegistryConfig(
+            name="gitlab",
+            url="https://gitlab.com",
+            type="git"
+        ),
+        "gitee": RegistryConfig(
+            name="gitee",
+            url="https://gitee.com",
+            type="git"
+        )
+    }
+
+    def __init__(self, config_dir: Path):
+        self._config_dir = config_dir
+        self._config_file = config_dir / "registries.toml"
+        self._registries: Dict[str, RegistryConfig] = {}
+        self._default_registry = "github"
+        self._load_config()
+
+    def _load_config(self) -> None:
+        """Load registry configuration from file."""
+        import tomllib
+
+        # Initialize with default registries
+        self._registries = dict(self.DEFAULT_REGISTRIES)
+
+        if self._config_file.exists():
+            try:
+                with open(self._config_file, "rb") as f:
+                    data = tomllib.load(f)
+
+                # Load default registry
+                self._default_registry = data.get("default", "github")
+
+                # Load custom registries
+                for name, config in data.get("registries", {}).items():
+                    self._registries[name] = RegistryConfig(
+                        name=name,
+                        url=config.get("url", ""),
+                        type=config.get("type", "git")
+                    )
+            except Exception as e:
+                logging.warning(f"Failed to load registry config: {e}")
+
+    def _save_config(self) -> None:
+        """Save registry configuration to file."""
+        try:
+            self._config_dir.mkdir(parents=True, exist_ok=True)
+
+            data = {
+                "default": self._default_registry,
+                "registries": {}
+            }
+
+            for name, config in self._registries.items():
+                # Skip default registries
+                if name in self.DEFAULT_REGISTRIES:
+                    continue
+                data["registries"][name] = {
+                    "url": config.url,
+                    "type": config.type
+                }
+
+            # Use tomli_w to write
+            import tomli_w
+            with open(self._config_file, "wb") as f:
+                tomli_w.dump(data, f)
+
+        except Exception as e:
+            logging.error(f"Failed to save registry config: {e}")
+
+    def add_registry(self, name: str, url: str, registry_type: str = "git") -> Tuple[bool, str]:
+        """Add a custom registry.
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        if name in self._registries:
+            return False, f"Registry '{name}' already exists"
+
+        self._registries[name] = RegistryConfig(
+            name=name,
+            url=url,
+            type=registry_type
+        )
+        self._save_config()
+        return True, f"Registry '{name}' added successfully"
+
+    def remove_registry(self, name: str) -> Tuple[bool, str]:
+        """Remove a custom registry.
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        if name not in self._registries:
+            return False, f"Registry '{name}' does not exist"
+
+        if name in self.DEFAULT_REGISTRIES:
+            return False, f"Cannot remove default registry '{name}'"
+
+        del self._registries[name]
+
+        # Update default if needed
+        if self._default_registry == name:
+            self._default_registry = "github"
+
+        self._save_config()
+        return True, f"Registry '{name}' removed successfully"
+
+    def list_registries(self) -> List[RegistryConfig]:
+        """List all available registries."""
+        return list(self._registries.values())
+
+    def set_default_registry(self, name: str) -> Tuple[bool, str]:
+        """Set the default registry.
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        if name not in self._registries:
+            return False, f"Registry '{name}' does not exist"
+
+        self._default_registry = name
+        self._save_config()
+        return True, f"Default registry set to '{name}'"
+
+    def get_registry(self, name: str) -> Optional[RegistryConfig]:
+        """Get a registry by name."""
+        return self._registries.get(name)
+
+    def get_default_registry(self) -> RegistryConfig:
+        """Get the default registry."""
+        return self._registries.get(
+            self._default_registry,
+            self.DEFAULT_REGISTRIES["github"]
+        )
+
+
 class SkillRegistry:
     """Registry for managing skills."""
 
@@ -2095,12 +2259,234 @@ class SkillRegistry:
 
                 return True, f"Skill '{skill.name}' v{skill.version} installed successfully"
 
-            # TODO: Support URL and registry installation
-            return False, "Only local directory installation is currently supported"
+            # Try to install from remote source (Git or URL)
+            return self._install_from_remote(source, confirm_permissions)
 
         except Exception as e:
             logging.error(f"Failed to install skill: {e}")
             return False, f"Installation error: {e}"
+
+    def _parse_git_source(self, source: str) -> Optional[Dict[str, str]]:
+        """Parse a git source identifier into components.
+
+        Supported formats:
+        - github:user/repo
+        - github:user/repo/path/to/skill
+        - gitlab:user/repo
+        - https://github.com/user/repo.git
+        - https://github.com/user/repo/tree/main/path/to/skill
+
+        Returns:
+            Dict with keys: host, user, repo, path (optional), ref (optional)
+            or None if parsing fails
+        """
+        import re
+
+        # Remove leading/trailing whitespace
+        source = source.strip()
+
+        # Pattern 1: Short form like "github:user/repo" or "github:user/repo/path"
+        short_pattern = r'^(github|gitlab|bitbucket|gitee):([\w.-]+)/([\w.-]+)(?:/(.+))?$'
+        match = re.match(short_pattern, source, re.IGNORECASE)
+        if match:
+            return {
+                'host': match.group(1).lower(),
+                'user': match.group(2),
+                'repo': match.group(3),
+                'path': match.group(4) or '',
+                'ref': 'HEAD'  # Default to HEAD
+            }
+
+        # Pattern 2: Full HTTPS URL like "https://github.com/user/repo.git" or with tree/blob
+        https_pattern = r'^https?://(github\.com|gitlab\.com|bitbucket\.org|gitee\.com)/([\w.-]+)/([\w.-]+?)(?:\.git)?(?:/tree/|/blob/)?([^?]*)?'
+        match = re.match(https_pattern, source, re.IGNORECASE)
+        if match:
+            host_map = {
+                'github.com': 'github',
+                'gitlab.com': 'gitlab',
+                'bitbucket.org': 'bitbucket',
+                'gitee.com': 'gitee'
+            }
+            path = match.group(4) or ''
+            # Remove trailing slashes and extract ref if present
+            ref = 'HEAD'
+            if '/tree/' in source:
+                # Extract ref from URL like /tree/main/path
+                parts = path.split('/', 1)
+                if parts:
+                    ref = parts[0]
+                    path = parts[1] if len(parts) > 1 else ''
+
+            return {
+                'host': host_map.get(match.group(1).lower(), match.group(1).lower()),
+                'user': match.group(2),
+                'repo': match.group(3),
+                'path': path.strip('/'),
+                'ref': ref
+            }
+
+        # Pattern 3: SSH URL like "git@github.com:user/repo.git"
+        ssh_pattern = r'^git@(github\.com|gitlab\.com|bitbucket\.org|gitee\.com):([\w.-]+)/([\w.-]+?)(?:\.git)?$'
+        match = re.match(ssh_pattern, source, re.IGNORECASE)
+        if match:
+            host_map = {
+                'github.com': 'github',
+                'gitlab.com': 'gitlab',
+                'bitbucket.org': 'bitbucket',
+                'gitee.com': 'gitee'
+            }
+            return {
+                'host': host_map.get(match.group(1).lower(), match.group(1).lower()),
+                'user': match.group(2),
+                'repo': match.group(3),
+                'path': '',
+                'ref': 'HEAD'
+            }
+
+        return None
+
+    def _get_git_clone_url(self, parsed: Dict[str, str]) -> str:
+        """Convert parsed source to a git clone URL."""
+        host_map = {
+            'github': 'https://github.com',
+            'gitlab': 'https://gitlab.com',
+            'bitbucket': 'https://bitbucket.org',
+            'gitee': 'https://gitee.com'
+        }
+        base = host_map.get(parsed['host'], f"https://{parsed['host']}")
+        return f"{base}/{parsed['user']}/{parsed['repo']}.git"
+
+    def _install_from_remote(self, source: str, confirm_permissions: bool = True) -> Tuple[bool, str]:
+        """Install a skill from a remote git repository or URL.
+
+        Args:
+            source: Git source identifier (e.g., "github:user/repo")
+            confirm_permissions: Whether to prompt for permission confirmation
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        import tempfile
+        import shutil
+
+        try:
+            # Parse the git source
+            parsed = self._parse_git_source(source)
+            if not parsed:
+                return False, f"Invalid source format: '{source}'. Expected formats:\n" \
+                              f"  - github:user/repo\n" \
+                              f"  - github:user/repo/path/to/skill\n" \
+                              f"  - https://github.com/user/repo.git"
+
+            # Get the clone URL
+            clone_url = self._get_git_clone_url(parsed)
+
+            # Create a temporary directory for cloning
+            with tempfile.TemporaryDirectory(prefix='freechat_skill_') as temp_dir:
+                temp_path = Path(temp_dir)
+
+                # Clone the repository
+                logging.info(f"Cloning from {clone_url}...")
+
+                # Use git command if available, otherwise use a simple HTTP download for single files
+                try:
+                    result = subprocess.run(
+                        ['git', 'clone', '--depth', '1', clone_url, str(temp_path / 'repo')],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if result.returncode != 0:
+                        return False, f"Failed to clone repository: {result.stderr}"
+
+                    repo_path = temp_path / 'repo'
+
+                except FileNotFoundError:
+                    return False, "Git command not found. Please install Git to install skills from remote repositories."
+
+                except subprocess.TimeoutExpired:
+                    return False, "Clone operation timed out. Please check your network connection."
+
+                # If a subpath is specified, navigate to it
+                skill_path = repo_path
+                if parsed.get('path'):
+                    subpath = repo_path / parsed['path']
+                    if subpath.exists() and subpath.is_dir():
+                        skill_path = subpath
+                    else:
+                        return False, f"Specified path '{parsed['path']}' not found in repository"
+
+                # Verify it's a valid skill package
+                skill_toml = skill_path / 'skill.toml'
+                if not skill_toml.exists():
+                    return False, f"No skill.toml found at '{skill_path}'. This does not appear to be a valid skill package."
+
+                # Now install from the local path (reusing existing logic)
+                return self.install(skill_path, confirm_permissions)
+
+        except Exception as e:
+            logging.error(f"Failed to install skill from remote: {e}")
+            return False, f"Remote installation error: {e}"
+
+    def _install_from_git(self, git_url: str, subpath: str = "", confirm_permissions: bool = True) -> Tuple[bool, str]:
+        """Install a skill from a git repository.
+
+        Args:
+            git_url: The git URL to clone
+            subpath: Optional subdirectory path within the repo
+            confirm_permissions: Whether to prompt for permission confirmation
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        import tempfile
+
+        try:
+            # Create a temporary directory for cloning
+            with tempfile.TemporaryDirectory(prefix='freechat_skill_') as temp_dir:
+                temp_path = Path(temp_dir)
+
+                # Clone the repository
+                logging.info(f"Cloning from {git_url}...")
+
+                try:
+                    result = subprocess.run(
+                        ['git', 'clone', '--depth', '1', git_url, str(temp_path / 'repo')],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if result.returncode != 0:
+                        return False, f"Failed to clone repository: {result.stderr}"
+
+                    repo_path = temp_path / 'repo'
+
+                except FileNotFoundError:
+                    return False, "Git command not found. Please install Git to install skills from remote repositories."
+
+                except subprocess.TimeoutExpired:
+                    return False, "Clone operation timed out. Please check your network connection."
+
+                # If a subpath is specified, navigate to it
+                skill_path = repo_path
+                if subpath:
+                    subpath_obj = repo_path / subpath
+                    if subpath_obj.exists() and subpath_obj.is_dir():
+                        skill_path = subpath_obj
+                    else:
+                        return False, f"Specified path '{subpath}' not found in repository"
+
+                # Verify it's a valid skill package
+                skill_toml = skill_path / 'skill.toml'
+                if not skill_toml.exists():
+                    return False, f"No skill.toml found at '{skill_path}'. This does not appear to be a valid skill package."
+
+                # Now install from the local path (reusing existing logic)
+                return self.install(skill_path, confirm_permissions)
+
+        except Exception as e:
+            logging.error(f"Failed to install skill from git: {e}")
+            return False, f"Git installation error: {e}"
 
     def uninstall(self, skill_name: str):
         """Uninstall a skill.

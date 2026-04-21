@@ -35,3 +35,11 @@ freechat_config/
 build/
 dist/
 *.egg-info/
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+
+# OS specific files
+Thumbs.db
+desktop.ini
