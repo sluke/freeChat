@@ -134,6 +134,10 @@ class FreeChatApp:
             "/session": self._handle_session_command, "/export": self._handle_export_command,
             "/file": self._handle_file_command,
             "/language": self._handle_language_command,
+            "/skill": self._handle_skill_command,
+            "/memory": self._handle_memory_command,
+            "/skill": self._handle_skill_command,
+            "/memory": self._handle_memory_command,
             "/clear": lambda args: self.console.clear(), "/exit": self._exit_app,
         }
         # Get log file path from config or use default
@@ -561,6 +565,8 @@ prompt = """You are a multilingual translator. Your task is to translate the use
   [cyan]/tool <action>[/cyan]         Manage tools: [dim]list, enable <name>, disable <name>, call <name> [args][/dim].
   [cyan]/language <code>[/cyan]       Switch interface language. Use without arguments to list available languages.
   [cyan]/export <format>[/cyan]       Export session: [dim]md, json, html, md-rendered[/dim].
+  [cyan]/skill <action>[/cyan]        Manage skills: [dim]list, install <path>, uninstall <name>, info <name>[/dim].
+  [cyan]/memory <action>[/cyan]       Manage memories: [dim]remember, recall, list, forget, compress, stats[/dim].
   [cyan]/clear[/cyan]                 Clear the terminal screen.
   [cyan]/exit[/cyan]                  Exit the application.
 [bold]Usage:[/bold]
@@ -824,6 +830,128 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             else: self.console.print(f"[bold red]Error: Unknown format '{fmt}'.[/bold red]"); return
             self.console.print(f"[bold green]✓ Session exported to {filename}[/bold green]")
         except Exception as e: self.console.print(f"[bold red]Error exporting session: {e}[/bold red]")
+
+    async def _handle_skill_command(self, args: List[str]):
+        """Handle /skill command for skill management."""
+        if not args or args[0] == "list":
+            # List installed skills
+            skills = self.skill_registry.list_skills()
+            if not skills:
+                self.console.print("[yellow]No skills installed.[/yellow]")
+                return
+            table = Table("Name", "Version", "Description", "Tools")
+            for skill in skills:
+                tool_count = len(skill.tools) if skill.tools else 0
+                table.add_row(skill.name, skill.version, skill.description[:50], str(tool_count))
+            self.console.print(table)
+
+        elif args[0] == "install" and len(args) > 1:
+            # Install skill from directory
+            source = args[1]
+            with self.console.status(f"[bold green]Installing skill from {source}..."):
+                success, message = self.skill_registry.install(source)
+            if success:
+                self.console.print(f"[bold green]✓ {message}[/bold green]")
+            else:
+                self.console.print(f"[bold red]✗ {message}[/bold red]")
+
+        elif args[0] == "uninstall" and len(args) > 1:
+            # Uninstall skill
+            skill_name = args[1]
+            success, message = self.skill_registry.uninstall(skill_name)
+            if success:
+                self.console.print(f"[bold green]✓ {message}[/bold green]")
+            else:
+                self.console.print(f"[bold red]✗ {message}[/bold red]")
+
+        elif args[0] == "info" and len(args) > 1:
+            # Show skill info
+            skill_name = args[1]
+            skill = self.skill_registry.get(skill_name)
+            if skill:
+                self.console.print(Panel(
+                    f"[bold]{skill.name}[/bold] v{skill.version}\n"
+                    f"Author: {skill.author}\n"
+                    f"Description: {skill.description}\n"
+                    f"Tools: {', '.join(t.name for t in skill.tools) if skill.tools else 'None'}",
+                    title="Skill Information"
+                ))
+            else:
+                self.console.print(f"[bold red]Skill '{skill_name}' not found.[/bold red]")
+
+        else:
+            self.console.print("[yellow]Usage:[/yellow]")
+            self.console.print("  /skill list                 - List installed skills")
+            self.console.print("  /skill install <path>       - Install skill from directory")
+            self.console.print("  /skill uninstall <name>     - Uninstall a skill")
+            self.console.print("  /skill info <name>          - Show skill information")
+
+    async def _handle_memory_command(self, args: List[str]):
+        """Handle /memory command for memory management."""
+        if not args:
+            self.console.print("[yellow]Usage:[/yellow]")
+            self.console.print("  /memory remember <text>   - Store a new memory")
+            self.console.print("  /memory recall <query>      - Search memories")
+            self.console.print("  /memory list               - List all memories")
+            self.console.print("  /memory forget <id>        - Delete a memory")
+            self.console.print("  /memory compress           - Run auction compression")
+            self.console.print("  /memory stats              - Show statistics")
+            return
+
+        cmd = args[0]
+
+        if cmd == "remember" and len(args) > 1:
+            text = " ".join(args[1:])
+            memory_id = self.memory_manager.remember(text)
+            self.console.print(f"[bold green]✓ Memory recorded ({memory_id})[/bold green]")
+
+        elif cmd == "recall" and len(args) > 1:
+            query = " ".join(args[1:])
+            memories = self.memory_manager.recall(query)
+            if memories:
+                table = Table("ID", "Content", "Score")
+                for mem in memories:
+                    content = mem.content[:50] + "..." if len(mem.content) > 50 else mem.content
+                    table.add_row(mem.id[:8], content, f"{mem.value_score:.2f}")
+                self.console.print(table)
+            else:
+                self.console.print("[yellow]No memories found.[/yellow]")
+
+        elif cmd == "list":
+            memories = self.memory_manager.list_all()
+            if memories:
+                table = Table("ID", "Category", "Content", "Score", "Access")
+                for mem in memories[:20]:  # Show first 20
+                    content = mem.content[:40] + "..." if len(mem.content) > 40 else mem.content
+                    table.add_row(mem.id[:8], mem.category, content, f"{mem.value_score:.2f}", str(mem.access_count))
+                self.console.print(table)
+                if len(memories) > 20:
+                    self.console.print(f"[dim]... and {len(memories) - 20} more memories[/dim]")
+            else:
+                self.console.print("[yellow]No memories stored.[/yellow]")
+
+        elif cmd == "forget" and len(args) > 1:
+            memory_id = args[1]
+            if self.memory_manager.forget(memory_id):
+                self.console.print(f"[bold green]✓ Memory deleted[/bold green]")
+            else:
+                self.console.print(f"[bold red]Memory not found[/bold red]")
+
+        elif cmd == "compress":
+            archived = self.memory_manager.compress()
+            self.console.print(f"[bold green]✓ Compressed {archived} memories (archived low-value memories)[/bold green]")
+
+        elif cmd == "stats":
+            stats = self.memory_manager.stats()
+            self.console.print(Panel(
+                f"Total memories: {stats.get('total', 0)}\n"
+                f"Active: {stats.get('active', 0)} | Archived: {stats.get('archived', 0)}\n"
+                f"Average score: {stats.get('avg_score', 0):.2f}",
+                title="Memory Statistics"
+            ))
+
+        else:
+            self.console.print("[yellow]Unknown memory command. Type /memory for usage.[/yellow]")
 
     def _register_builtin_tools(self):
         """Register built-in tools into the tool registry."""
@@ -1240,12 +1368,12 @@ class SkillDefinition:
 @dataclass
 class MemoryEntry:
     """A single memory entry with metadata for auction-based compression."""
-    id: str
-    content: str
-    category: str  # user_facts, preferences, knowledge, context, decisions
-    source: str
-    created_at: float
-    updated_at: float
+    id: str = ""
+    content: str = ""
+    category: str = "general"  # user_facts, preferences, knowledge, context, decisions
+    source: str = "user"
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
     access_count: int = 0
     last_accessed: float = 0
     importance: int = 5  # 1-10
@@ -1346,8 +1474,8 @@ class SQLiteMemoryStore:
     CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag);
     '''
 
-    def __init__(self, db_path: Path):
-        self._db_path = db_path
+    def __init__(self, db_path: Union[str, Path]):
+        self._db_path = Path(db_path)
         self._local = threading.local()
         self._init_database()
 
