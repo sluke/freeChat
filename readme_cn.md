@@ -2,7 +2,7 @@
 
 **您的全功能、便携式终端 AI 聊天利器 - v2.3.0 记忆系统与性能优化版**
 
-`FreeChat` 是一个功能强大、部署简单的单文件 AI 聊天命令行工具，专为在云端 VPS 上使用而设计。通过 SSH 连接后，它为您提供一个集成了多个主流 AI 提供商（如 OpenRouter, OpenAI, Gemini）的、功能丰富且响应迅速的聊天界面。
+`FreeChat` 是一个功能强大、部署简单的单文件 AI 聊天命令行工具，专为在云端 VPS 上使用而设计。通过 SSH 连接后，它为您提供一个集成了多个主流 AI 提供商（如 OpenRouter, OpenAI, Gemini, NVIDIA）的、功能丰富且响应迅速的聊天界面。
 
 ---
 
@@ -10,7 +10,7 @@
 
 *   ✅ **极致简化部署**: 真正的单脚本文件，无需复杂的环境配置。内置智能依赖安装程序，在 `Python 3.7+` 环境下开箱即用。
 *   📦 **便携模式**: 支持将所有配置、历史记录和会话数据保存在脚本旁边的目录中，方便整体打包、备份与迁移。
-*   📡 **多 AI 提供商支持**: 无缝集成 OpenRouter, OpenAI, Gemini 等，轻松切换，择优而用。
+*   📡 **多 AI 提供商支持**: 无缝集成 OpenRouter, OpenAI, Gemini, NVIDIA 等，轻松切换，择优而用。
 *   🧠 **通用模型接入**: 动态获取并连接不同提供商的任意模型，支持在 CLI 中即时选择与切换。
 *   🎨 **可定制的 AI 角色**: 通过简单的配置文件，轻松定义和切换 AI 的系统提示 (System Prompt)，让它扮演程序员、翻译官等不同角色。
 *   🚀 **纯文本流式交互**: 实时流式返回纯文本答案，响应迅速，兼容性强。
@@ -395,6 +395,9 @@ anthropic_api_key = ""
 
 # Mistral: https://console.mistral.ai/api-keys
 mistral_api_key = ""
+
+# NVIDIA: https://build.nvidia.com/explore/discover
+nvidia_api_key = ""
 ```
 
 ### 2. 系统提示文件: `prompts.toml`

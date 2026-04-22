@@ -10,7 +10,7 @@
 
 *   ✅ **Ultimate Simplified Deployment**: A true single-script file with no complex environment configuration required. Built-in intelligent dependency installer works out-of-the-box in a `Python 3.7+` environment.
 *   📦 **Portable Mode**: Supports saving all configuration, history, and session data in a directory alongside the script, making it easy to package, backup, and migrate as a whole.
-*   📡 **Multi-AI Provider Support**: Seamlessly integrates with OpenRouter, OpenAI, Gemini, and more, allowing for easy switching and optimal selection.
+*   📡 **Multi-AI Provider Support**: Seamlessly integrates with OpenRouter, OpenAI, Gemini, NVIDIA, and more, allowing for easy switching and optimal selection.
 *   🧠 **Universal Model Access**: Dynamically retrieves and connects to any model from different providers, supporting instant selection and switching directly in the CLI.
 *   🎨 **Customizable AI Roles**: Easily define and switch AI system prompts through a simple configuration file, allowing it to play different roles such as programmer, translator, etc.
 *   🚀 **Pure Text Streaming Interaction**: Returns real-time streaming of plain text answers, ensuring rapid response and strong compatibility.
@@ -350,6 +350,9 @@ anthropic_api_key = ""
 
 # Mistral: https://console.mistral.ai/api-keys
 mistral_api_key = ""
+
+# NVIDIA: https://build.nvidia.com/explore/discover
+nvidia_api_key = ""
 ```
 
 ### 2. System Prompts File: `prompts.toml`

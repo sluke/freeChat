@@ -387,6 +387,7 @@ openrouter_api_key = ""
 gemini_api_key = ""
 anthropic_api_key = ""
 mistral_api_key = ""
+nvidia_api_key = ""
 """
             with open(self.config_path, "w", encoding="utf-8") as f: f.write(default_config.strip() + "\n")
             self.console.print(f"[bold green]✓ Main config created at: {self.config_path}[/bold green]")
@@ -425,7 +426,8 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             "openrouter_api_key": "OPENROUTER_API_KEY",
             "gemini_api_key": "GEMINI_API_KEY",
             "anthropic_api_key": "ANTHROPIC_API_KEY",
-            "mistral_api_key": "MISTRAL_API_KEY"
+            "mistral_api_key": "MISTRAL_API_KEY",
+            "nvidia_api_key": "NVIDIA_API_KEY"
         }
         
         # Get environment variable override setting
@@ -3232,6 +3234,7 @@ class ProviderFactory:
         if key := cfg.get("gemini_api_key"): self.providers["gemini"] = GeminiProvider(key)
         if key := cfg.get("anthropic_api_key"): self.providers["anthropic"] = OpenAIProvider(key, "https://api.anthropic.com/v1", "anthropic")
         if key := cfg.get("mistral_api_key"): self.providers["mistral"] = OpenAIProvider(key, "https://api.mistral.ai/v1", "mistral")
+        if key := cfg.get("nvidia_api_key"): self.providers["nvidia"] = OpenAIProvider(key, "https://integrate.api.nvidia.com/v1", "nvidia")
     def get_provider(self, model_id: str) -> Optional[AIProvider]: return self.providers.get(model_id.split('/')[0])
     def get_available_providers(self) -> List[str]: return list(self.providers.keys())
 

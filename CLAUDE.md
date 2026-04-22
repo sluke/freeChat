@@ -42,6 +42,7 @@ Supported providers:
 - `gemini/` - Google Gemini API
 - `anthropic/` - Anthropic Claude API
 - `mistral/` - Mistral AI API
+- `nvidia/` - NVIDIA API (OpenAI-compatible, https://integrate.api.nvidia.com)
 
 Provider auto-detection via `ProviderFactory` which parses the model ID prefix.
 
