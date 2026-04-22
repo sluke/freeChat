@@ -1921,8 +1921,8 @@ class BranchMemoryManager:
         self._repo_path: Optional[Path] = None
         self._detect_git_repo()
 
-    def _detect_git_repo(self) -> bool:
-        """Detect if we're in a git repo."""
+    def _detect_git_repo(self) -> Optional[Path]:
+        """Detect if we're in a git repo, return the repo path or None."""
         try:
             # Look for .git directory
             cwd = Path.cwd()
@@ -1930,10 +1930,12 @@ class BranchMemoryManager:
                 git_dir = path / ".git"
                 if git_dir.exists() and git_dir.is_dir():
                     self._repo_path = path
-                    return True
-            return False
+                    return path
+            self._repo_path = None
+            return None
         except Exception:
-            return False
+            self._repo_path = None
+            return None
 
     def get_current_branch(self) -> Optional[str]:
         """Get current git branch name."""
