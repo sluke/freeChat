@@ -328,7 +328,15 @@ FreeChat 现在支持导出带有渲染 Markdown 内容的会话。当您使用 
 | 命令 | 参数 | 描述 |
 | :--- | :--- | :--- |
 | `/help` | (无) | 显示此帮助信息。 |
-| `/model` | `<provider/model_name>` | 切换当前使用的 AI 模型。例如: `/model openai/gpt-4o`。不带参数则显示当前模型。 |
+| `/model` | (无) | 显示当前模型详细信息（提供商、状态、收藏）。 |
+| | `<provider/model_name>` | 切换当前使用的 AI 模型。例如: `/model openai/gpt-4o`。自动记录到最近使用列表。 |
+| | `list` | 列出所有已配置提供商的可用模型。 |
+| | `list <provider>` | 列出指定提供商的模型（例如: `/model list openai`）。 |
+| | `search <keyword>` | 跨所有提供商按关键词搜索模型。 |
+| | `info <name>` | 显示模型的详细信息，包括价格（如果可用）。 |
+| | `recent` | 显示最近使用的模型（最多 10 个）。 |
+| | `fav` | 显示收藏模型列表。 |
+| | `fav <name>` | 添加或移除收藏模型。 |
 | `/prompt`| `list` | 列出所有在 `prompts.toml` 中定义的可用系统提示。|
 | | `view` | 查看当前正在使用的系统提示的完整内容。|
 | | `<name>` | 切换到指定的系统提示，并自动开始一个新会话。例如: `/prompt coder`。|

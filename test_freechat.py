@@ -108,7 +108,10 @@ prompt = "You are a test assistant"
         with patch('freechat.Console.print') as mock_print:
             import asyncio
             asyncio.run(self.app._handle_model_command(['invalid-provider/test-model']))
-            mock_print.assert_called_with('[bold red]Error: Provider for \'invalid-provider/test-model\' not found.[/bold red]')
+            # Should print error message and available providers list
+            calls = [c.args[0] for c in mock_print.call_args_list]
+            self.assertTrue(any('Error' in str(c) for c in calls))
+            self.assertTrue(any('Available providers' in str(c) for c in calls))
     
     def test_handle_session_command(self):
         """Test session command handling"""

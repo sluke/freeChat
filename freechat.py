@@ -122,6 +122,8 @@ class FreeChatApp:
         self.models_last_fetched: float = 0
         self.MODELS_CACHE_TTL: int = 3600  # 1 hour cache
         self.provider_factory = ProviderFactory(self.config)
+        self.recent_models: List[str] = self.config.get("general", {}).get("recent_models", [])
+        self.favorite_models: List[str] = self.config.get("general", {}).get("favorite_models", [])
         try: 
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
         except Exception as e:
@@ -555,7 +557,15 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         help_text = """[bold]Welcome to FreeChat! ✨[/bold]
 [bold]Commands:[/bold]
   [cyan]/help[/cyan]                  Show this help message.
+  [cyan]/model[/cyan]                   Show current model with details.
   [cyan]/model <name>[/cyan]          Switch AI model.
+  [cyan]/model list[/cyan]              List available models.
+  [cyan]/model list <provider>[/cyan]   List models from a specific provider.
+  [cyan]/model search <kw>[/cyan]       Search models by keyword.
+  [cyan]/model info <name>[/cyan]       Show model details.
+  [cyan]/model recent[/cyan]            Show recently used models.
+  [cyan]/model fav[/cyan]               Show favorite models.
+  [cyan]/model fav <name>[/cyan]       Toggle favorite status.
   [cyan]/prompt <action>[/cyan]        Manage system prompts: [dim]list, view, <name>[/dim].
   [cyan]/session new[/cyan]           Start a new chat session with the default prompt.
   [cyan]/session save <name>[/cyan]      Save the current session with a name.
@@ -585,33 +595,284 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         else: self.console.print(f"[yellow]Unknown command: {cmd}. Type /help.[/yellow]")
 
     async def _handle_model_command(self, args: List[str]):
+        """Handle /model command with enhanced capabilities."""
         if not args:
-            self.console.print(f"[yellow]Current model: {self.current_model}. Usage: /model <name> or /model list[/yellow]")
+            # Show current model with details
+            await self._show_current_model()
             return
 
-        if args[0] == 'list':
-            # List available models from all providers
-            table = Table("Provider", "Model ID", title="Available Models")
-            for provider_name, provider in self.provider_factory.providers.items():
-                try:
-                    _, models = await provider.get_models()
-                    for model in models[:10]:  # Show first 10 models per provider
-                        table.add_row(provider_name, model)
-                    if len(models) > 10:
-                        table.add_row("", f"... and {len(models) - 10} more")
-                except Exception as e:
-                    table.add_row(provider_name, f"[Error: {e}]")
-            self.console.print(table)
+        cmd = args[0]
+
+        if cmd == 'list':
+            provider_filter = args[1] if len(args) > 1 else None
+            await self._list_models(provider_filter)
             return
 
-        new_model = args[0]
-        if new_model.split('/')[0] in self.provider_factory.get_available_providers():
+        if cmd == 'search':
+            if len(args) < 2:
+                self.console.print("[yellow]Usage: /model search <keyword>[/yellow]")
+                return
+            await self._search_models(args[1])
+            return
+
+        if cmd == 'info':
+            if len(args) < 2:
+                self.console.print("[yellow]Usage: /model info <model_name>[/yellow]")
+                return
+            await self._show_model_info(args[1])
+            return
+
+        if cmd == 'recent':
+            self._show_recent_models()
+            return
+
+        if cmd == 'fav':
+            if len(args) > 1:
+                await self._toggle_favorite(args[1])
+            else:
+                self._show_favorite_models()
+            return
+
+        # Default: switch model
+        await self._switch_model(cmd)
+
+    async def _show_current_model(self):
+        """Display current model with detailed information."""
+        provider_name = self.current_model.split('/')[0] if '/' in self.current_model else 'unknown'
+        model_name = self.current_model.split('/', 1)[1] if '/' in self.current_model else self.current_model
+
+        self.console.print(f"\n[bold cyan]Current Model[/bold cyan]")
+        self.console.print(f"  [bold]{self.current_model}[/bold]")
+
+        # Show provider info
+        provider = self.provider_factory.get_provider(self.current_model)
+        if provider:
+            self.console.print(f"  Provider: {provider_name}")
+            self.console.print(f"  Status: [green]Available[/green]")
+        else:
+            self.console.print(f"  Provider: {provider_name}")
+            self.console.print(f"  Status: [red]Not available (no API key)[/red]")
+
+        # Show if it's a favorite
+        if self.current_model in self.favorite_models:
+            self.console.print(f"  [yellow]★ Favorite[/yellow]")
+
+        self.console.print(f"\n[yellow]Usage:[/yellow]")
+        self.console.print(f"  /model <name>          - Switch to a model")
+        self.console.print(f"  /model list            - List available models")
+        self.console.print(f"  /model list <provider> - List models from a provider")
+        self.console.print(f"  /model search <kw>     - Search models by keyword")
+        self.console.print(f"  /model info <name>     - Show model details")
+        self.console.print(f"  /model recent          - Show recently used models")
+        self.console.print(f"  /model fav             - Show favorite models")
+        self.console.print(f"  /model fav <name>      - Toggle favorite status\n")
+
+    async def _list_models(self, provider_filter: Optional[str] = None):
+        """List available models, optionally filtered by provider."""
+        table = Table(title="Available Models")
+        table.add_column("Provider", style="cyan", no_wrap=True)
+        table.add_column("Model ID", style="green")
+        table.add_column("Status", style="dim")
+
+        providers_to_list = {provider_filter: self.provider_factory.providers.get(provider_filter)} if provider_filter else self.provider_factory.providers
+
+        if provider_filter and provider_filter not in self.provider_factory.providers:
+            self.console.print(f"[bold red]Error: Provider '{provider_filter}' not found.[/bold red]")
+            self.console.print(f"[yellow]Available providers: {', '.join(self.provider_factory.get_available_providers())}[/yellow]")
+            return
+
+        total_models = 0
+        for provider_name, provider in providers_to_list.items():
+            if not provider:
+                continue
+            try:
+                _, models = await provider.get_models()
+                total_models += len(models)
+                for i, model in enumerate(models):
+                    model_id = f"{provider_name}/{model}"
+                    status = ""
+                    if model_id == self.current_model:
+                        status = "[bold yellow]← current[/bold yellow]"
+                    elif model_id in self.favorite_models:
+                        status = "[yellow]★[/yellow]"
+
+                    if i < 15 or len(models) <= 15:
+                        table.add_row(provider_name, model, status)
+                    elif i == 15:
+                        table.add_row("", f"[dim]... and {len(models) - 15} more[/dim]", "")
+                        break
+            except Exception as e:
+                table.add_row(provider_name, f"[red]Error: {e}[/red]", "")
+
+        self.console.print(table)
+        self.console.print(f"[dim]Total: {total_models} models from {len(self.provider_factory.providers)} provider(s)[/dim]")
+
+    async def _search_models(self, keyword: str):
+        """Search models by keyword."""
+        keyword_lower = keyword.lower()
+        results = []
+
+        for provider_name, provider in self.provider_factory.providers.items():
+            try:
+                _, models = await provider.get_models()
+                for model in models:
+                    model_id = f"{provider_name}/{model}"
+                    if keyword_lower in model_id.lower():
+                        results.append((provider_name, model, model_id))
+            except Exception:
+                continue
+
+        if not results:
+            self.console.print(f"[yellow]No models found matching '{keyword}'.[/yellow]")
+            return
+
+        table = Table(title=f"Search Results for '{keyword}'")
+        table.add_column("Provider", style="cyan")
+        table.add_column("Model ID", style="green")
+        table.add_column("", style="dim")
+
+        for provider_name, model, model_id in results[:30]:
+            status = ""
+            if model_id == self.current_model:
+                status = "[bold yellow]← current[/bold yellow]"
+            elif model_id in self.favorite_models:
+                status = "[yellow]★[/yellow]"
+            table.add_row(provider_name, model, status)
+
+        if len(results) > 30:
+            table.add_row("", f"[dim]... and {len(results) - 30} more[/dim]", "")
+
+        self.console.print(table)
+        self.console.print(f"[dim]Found {len(results)} result(s)[/dim]")
+
+    async def _show_model_info(self, model_name: str):
+        """Show detailed information about a model."""
+        # Ensure model has provider prefix
+        if '/' not in model_name:
+            self.console.print(f"[yellow]Model name should include provider prefix, e.g., openrouter/gpt-4[/yellow]")
+            return
+
+        provider_name = model_name.split('/')[0]
+        provider = self.provider_factory.get_provider(model_name)
+
+        if not provider:
+            self.console.print(f"[bold red]Error: Provider '{provider_name}' not available.[/bold red]")
+            return
+
+        try:
+            _, models = await provider.get_models()
+            model_part = model_name.split('/', 1)[1]
+
+            if model_part not in models:
+                self.console.print(f"[yellow]Model '{model_name}' not found in provider's model list.[/yellow]")
+                return
+
+            self.console.print(f"\n[bold cyan]Model: {model_name}[/bold cyan]")
+            self.console.print(f"  Provider: {provider_name}")
+            self.console.print(f"  Available: [green]Yes[/green]")
+
+            if model_name == self.current_model:
+                self.console.print(f"  Status: [bold yellow]Currently selected[/bold yellow]")
+
+            if model_name in self.favorite_models:
+                self.console.print(f"  Favorite: [yellow]★ Yes[/yellow]")
+            else:
+                self.console.print(f"  Favorite: No")
+
+            # Show pricing if available (OpenRouter)
+            if hasattr(provider, 'prices') and provider.prices and model_part in provider.prices:
+                pricing = provider.prices[model_part]
+                self.console.print(f"  Input price: ${pricing.get('input', 0):.6f}/token")
+                self.console.print(f"  Output price: ${pricing.get('output', 0):.6f}/token")
+
+        except Exception as e:
+            self.console.print(f"[red]Error getting model info: {e}[/red]")
+
+    def _show_recent_models(self):
+        """Display recently used models."""
+        if not self.recent_models:
+            self.console.print("[yellow]No recent models. Start chatting to build history![/yellow]")
+            return
+
+        table = Table(title="Recent Models")
+        table.add_column("#", style="dim", justify="right")
+        table.add_column("Model", style="green")
+        table.add_column("", style="dim")
+
+        for i, model in enumerate(self.recent_models[:10], 1):
+            status = ""
+            if model == self.current_model:
+                status = "[bold yellow]← current[/bold yellow]"
+            elif model in self.favorite_models:
+                status = "[yellow]★[/yellow]"
+            table.add_row(str(i), model, status)
+
+        self.console.print(table)
+
+    def _show_favorite_models(self):
+        """Display favorite models."""
+        if not self.favorite_models:
+            self.console.print("[yellow]No favorite models. Use /model fav <name> to add one.[/yellow]")
+            return
+
+        table = Table(title="Favorite Models")
+        table.add_column("#", style="dim", justify="right")
+        table.add_column("Model", style="green")
+        table.add_column("", style="dim")
+
+        for i, model in enumerate(self.favorite_models, 1):
+            status = "[bold yellow]← current[/bold yellow]" if model == self.current_model else ""
+            table.add_row(str(i), model, status)
+
+        self.console.print(table)
+
+    async def _toggle_favorite(self, model_name: str):
+        """Toggle favorite status for a model."""
+        if model_name in self.favorite_models:
+            self.favorite_models.remove(model_name)
+            self.console.print(f"[bold yellow]★ Removed '{model_name}' from favorites.[/bold yellow]")
+        else:
+            # Validate model exists
+            provider_name = model_name.split('/')[0] if '/' in model_name else ''
+            if provider_name not in self.provider_factory.get_available_providers():
+                self.console.print(f"[bold red]Error: Provider for '{model_name}' not found.[/bold red]")
+                return
+
+            self.favorite_models.append(model_name)
+            self.console.print(f"[bold yellow]★ Added '{model_name}' to favorites.[/bold yellow]")
+
+        # Save to config
+        if "general" not in self.config:
+            self.config["general"] = {}
+        self.config["general"]["favorite_models"] = self.favorite_models
+        self._save_config()
+
+    def _update_recent_models(self, model: str):
+        """Update the recent models list."""
+        if model in self.recent_models:
+            self.recent_models.remove(model)
+        self.recent_models.insert(0, model)
+        self.recent_models = self.recent_models[:10]  # Keep only last 10
+
+        # Save to config
+        if "general" not in self.config:
+            self.config["general"] = {}
+        self.config["general"]["recent_models"] = self.recent_models
+        self._save_config()
+
+    async def _switch_model(self, new_model: str):
+        """Switch to a new model."""
+        provider_prefix = new_model.split('/')[0] if '/' in new_model else ''
+
+        if provider_prefix in self.provider_factory.get_available_providers():
             old_model = self.current_model
             self.current_model = new_model
+            self._update_recent_models(new_model)
             self.console.print(f"[bold green]✓ Switched model to: {self.current_model}[/bold green]")
             self._log("info", f"Switched model from {old_model} to {new_model}")
         else:
             self.console.print(f"[bold red]Error: Provider for '{new_model}' not found.[/bold red]")
+            self.console.print(f"[yellow]Available providers: {', '.join(self.provider_factory.get_available_providers())}[/yellow]")
             self._log("error", f"Failed to switch model: Provider for '{new_model}' not found")
 
     async def _handle_session_command(self, args: List[str]):

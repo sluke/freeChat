@@ -1,2 +1,5 @@
 [general]
 language = "en"
+recent_models = [
+    "openrouter/test-model",
+]

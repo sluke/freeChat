@@ -279,7 +279,15 @@ FreeChat now supports exporting sessions with rendered Markdown content. When yo
 | Command | Parameters | Description |
 | :--- | :--- | :--- |
 | `/help` | (none) | Display this help message. |
-| `/model` | `<provider/model_name>` | Switch the currently used AI model. Example: `/model openai/gpt-4o`. Without parameters, shows current model. |
+| `/model` | (none) | Show the current model with detailed information (provider, status, favorites). |
+| | `<provider/model_name>` | Switch the currently used AI model. Example: `/model openai/gpt-4o`. Automatically records to recent models. |
+| | `list` | List all available models from all configured providers. |
+| | `list <provider>` | List models from a specific provider (e.g., `/model list openai`). |
+| | `search <keyword>` | Search models by keyword across all providers. |
+| | `info <name>` | Show detailed information about a model, including pricing (if available). |
+| | `recent` | Display recently used models (up to 10). |
+| | `fav` | Display your favorite models list. |
+| | `fav <name>` | Add or remove a model from favorites. |
 | `/prompt`| `list` | Lists all available system prompts defined in `prompts.toml`. |
 | | `view` | View the full content of the currently used system prompt. |
 | | `<name>` | Switch to the specified system prompt and automatically start a new session. Example: `/prompt coder`. |
