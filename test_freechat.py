@@ -14,7 +14,12 @@ from pathlib import Path
 # Add the project root to the path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from freechat import FreeChatApp, ProviderFactory, AIProvider
+from freechat import (
+    FreeChatApp, ProviderFactory, AIProvider,
+    SkillSecurityManager, SkillSandbox, SQLiteMemoryStore,
+    ToolRegistry, SkillMetadata, SkillDefinition, ToolParameter,
+    MemoryEntry
+)
 
 class TestFreeChatApp(unittest.TestCase):
     """Test FreeChatApp class"""
@@ -773,6 +778,222 @@ class TestBranchMemoryManager(unittest.TestCase):
         )
         branches = self.branch_manager.list_branches_with_memories()
         self.assertIsInstance(branches, list)
+
+
+
+
+class TestSkillSecurityManager(unittest.TestCase):
+    """Test SkillSecurityManager class"""
+
+    def test_permission_constants(self):
+        """Test permission constants are defined"""
+        self.assertEqual(SkillSecurityManager.PERMISSION_FILE_READ, "file_read")
+        self.assertEqual(SkillSecurityManager.PERMISSION_FILE_WRITE, "file_write")
+        self.assertEqual(SkillSecurityManager.PERMISSION_NETWORK, "network")
+        self.assertEqual(SkillSecurityManager.PERMISSION_SHELL, "shell")
+        self.assertEqual(SkillSecurityManager.PERMISSION_ENV, "env")
+
+    def test_set_and_get_permissions(self):
+        """Test setting and getting permissions"""
+        skill_name = "test_skill"
+        permissions = ["file_read", "network"]
+
+        SkillSecurityManager.set_permissions(skill_name, permissions)
+        result = SkillSecurityManager.get_permissions(skill_name)
+
+        self.assertEqual(result, permissions)
+
+    def test_has_permission(self):
+        """Test checking if skill has permission"""
+        skill_name = "test_skill_2"
+        SkillSecurityManager.set_permissions(skill_name, ["file_read", "file_write"])
+
+        self.assertTrue(SkillSecurityManager.has_permission(skill_name, "file_read"))
+        self.assertTrue(SkillSecurityManager.has_permission(skill_name, "file_write"))
+        self.assertFalse(SkillSecurityManager.has_permission(skill_name, "network"))
+        self.assertFalse(SkillSecurityManager.has_permission(skill_name, "shell"))
+
+    def test_validate_skill_path(self):
+        """Test skill path validation"""
+        # Valid path in home directory
+        valid_path = Path.home() / "test_skill"
+        result, msg = SkillSecurityManager.validate_skill_path(valid_path)
+        self.assertTrue(result)
+        self.assertEqual(msg, "OK")
+
+    def test_generate_install_token(self):
+        """Test install token generation"""
+        skill_name = "test_skill"
+        token = SkillSecurityManager.generate_install_token(skill_name)
+
+        self.assertIsInstance(token, str)
+        self.assertTrue(token.startswith(f"{skill_name}:"))
+        self.assertGreater(len(token), len(skill_name) + 10)
+
+
+class TestSkillSandbox(unittest.TestCase):
+    """Test SkillSandbox class"""
+
+    def setUp(self):
+        """Set up test environment"""
+        # Create sandbox with some permissions
+        self.sandbox = SkillSandbox("test_skill", ["file_read", "file_write", "network"])
+
+    def test_initialization(self):
+        """Test sandbox initialization"""
+        self.assertEqual(self.sandbox.skill_name, "test_skill")
+        self.assertEqual(self.sandbox.allowed_permissions, {"file_read", "file_write", "network"})
+
+    def test_check_permission(self):
+        """Test permission checking"""
+        # Allowed permissions
+        self.assertTrue(self.sandbox.check_permission("file_read"))
+        self.assertTrue(self.sandbox.check_permission("file_write"))
+        self.assertTrue(self.sandbox.check_permission("network"))
+
+        # Denied permissions
+        self.assertFalse(self.sandbox.check_permission("shell"))
+        self.assertFalse(self.sandbox.check_permission("env"))
+
+    def test_validate_file_access(self):
+        """Test file access validation"""
+        # Valid file path
+        test_file = Path.home() / "test.txt"
+        allowed, msg = self.sandbox.validate_file_access(test_file, "read")
+        self.assertTrue(allowed)
+        self.assertEqual(msg, "OK")
+
+    def test_context_manager(self):
+        """Test sandbox as context manager"""
+        # The context manager modifies environment variables
+        import os
+        original_env = dict(os.environ)
+
+        with self.sandbox:
+            # Inside sandbox, environment is restricted
+            self.assertIn("PATH", os.environ)
+
+        # After exiting, environment should be restored
+        self.assertEqual(os.environ, original_env)
+
+
+class TestToolRegistry(unittest.TestCase):
+    """Test ToolRegistry class"""
+
+    def setUp(self):
+        """Set up test environment"""
+        self.registry = ToolRegistry()
+
+    def test_register_get_tool(self):
+        """Test tool registration and retrieval using mock"""
+        # Create a simple mock ToolDefinition using SimpleNamespace
+        from types import SimpleNamespace
+        tool_def = SimpleNamespace(
+            name="test_tool",
+            description="A test tool",
+            parameters=[],
+            handler=lambda x: x
+        )
+
+        self.registry.register(tool_def)
+
+        # Verify tool was registered
+        self.assertIn("test_tool", self.registry._tools)
+
+        # Test get
+        retrieved = self.registry.get("test_tool")
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.name, "test_tool")
+
+    def test_unregister_tool(self):
+        """Test tool unregistration"""
+        from types import SimpleNamespace
+        tool_def = SimpleNamespace(
+            name="test_tool",
+            description="A test tool",
+            parameters=[],
+            handler=lambda x: x
+        )
+
+        self.registry.register(tool_def)
+        self.assertIn("test_tool", self.registry._tools)
+
+        self.registry.unregister("test_tool")
+        self.assertNotIn("test_tool", self.registry._tools)
+
+    def test_list_all_tools(self):
+        """Test listing all tools"""
+        from types import SimpleNamespace
+        tool1 = SimpleNamespace(name="tool1", description="Tool 1", parameters=[], handler=lambda: None)
+        tool2 = SimpleNamespace(name="tool2", description="Tool 2", parameters=[], handler=lambda: None)
+
+        self.registry.register(tool1)
+        self.registry.register(tool2)
+
+        all_tools = self.registry.list_all()
+        self.assertEqual(len(all_tools), 2)
+
+    def test_enable_disable_tool(self):
+        """Test enabling and disabling tools"""
+        from types import SimpleNamespace
+        tool_def = SimpleNamespace(
+            name="test_tool",
+            description="A test tool",
+            parameters=[],
+            handler=lambda x: x
+        )
+
+        self.registry.register(tool_def)
+
+        # Initially not enabled
+        self.assertFalse(self.registry.is_enabled("test_tool"))
+
+        # Enable
+        result = self.registry.enable("test_tool")
+        self.assertTrue(result)
+        self.assertTrue(self.registry.is_enabled("test_tool"))
+
+        # Disable
+        self.registry.disable("test_tool")
+        self.assertFalse(self.registry.is_enabled("test_tool"))
+
+
+class TestSkillMetadata(unittest.TestCase):
+    """Test SkillMetadata class"""
+
+    def test_creation(self):
+        """Test skill metadata creation"""
+        metadata = SkillMetadata(
+            name="test_skill",
+            version="1.0.0",
+            description="A test skill",
+            author="Test Author"
+        )
+
+        self.assertEqual(metadata.name, "test_skill")
+        self.assertEqual(metadata.version, "1.0.0")
+        self.assertEqual(metadata.description, "A test skill")
+        self.assertEqual(metadata.author, "Test Author")
+        # Check __slots__ fields exist
+        self.assertTrue(hasattr(metadata, 'name'))
+        self.assertTrue(hasattr(metadata, 'version'))
+        self.assertTrue(hasattr(metadata, 'description'))
+
+    def test_from_toml(self):
+        """Test creating metadata from TOML data"""
+        toml_data = {
+            "skill": {
+                "name": "test_skill",
+                "version": "1.0.0",
+                "description": "A test skill",
+                "author": "Test Author"
+            }
+        }
+
+        metadata = SkillMetadata.from_toml(toml_data)
+        self.assertEqual(metadata.name, "test_skill")
+        self.assertEqual(metadata.version, "1.0.0")
+        self.assertEqual(metadata.description, "A test skill")
 
 
 if __name__ == '__main__':
