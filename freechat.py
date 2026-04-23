@@ -138,8 +138,6 @@ class FreeChatApp:
             "/language": self._handle_language_command,
             "/skill": self._handle_skill_command,
             "/memory": self._handle_memory_command,
-            "/skill": self._handle_skill_command,
-            "/memory": self._handle_memory_command,
             "/clear": lambda args: self.console.clear(), "/exit": self._exit_app,
         }
         # Get log file path from config or use default
@@ -208,13 +206,13 @@ class FreeChatApp:
         self.memory_dir = self.config_dir / "memories"
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
-        # Detect git branch for branch-specific memories
-        branch_manager = BranchMemoryManager(MemoryManager(self.memory_dir / "default.db"))
-        current_branch = branch_manager.get_current_branch()
+        # Detect git branch for branch-specific memories (no DB needed)
+        current_branch = BranchMemoryManager.get_current_branch()
 
         # Initialize memory manager with detected branch
         memory_db_path = self.memory_dir / "memories.db"
         self.memory_manager = MemoryManager(memory_db_path, current_branch)
+        self.branch_memory_manager = BranchMemoryManager(self.memory_manager)
 
         self._apply_prompt(self.default_prompt_name, is_startup=True)
 
@@ -1161,45 +1159,291 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         """Handle /memory command for memory management."""
         if not args:
             self.console.print("[yellow]Usage:[/yellow]")
-            self.console.print("  /memory remember <text>   - Store a new memory")
-            self.console.print("  /memory recall <query>      - Search memories")
-            self.console.print("  /memory list               - List all memories")
-            self.console.print("  /memory forget <id>        - Delete a memory")
-            self.console.print("  /memory compress           - Run auction compression")
-            self.console.print("  /memory stats              - Show statistics")
+            self.console.print("  /memory remember <text> [--cat <c>] [--tags <t1,t2>]")
+            self.console.print("                               - Store a new memory")
+            self.console.print("  /memory recall <query>         - Search memories by keyword")
+            self.console.print("  /memory search <query> [opts]  - Advanced search with filters")
+            self.console.print("  /memory list [category]        - List memories")
+            self.console.print("  /memory top [n]                - Show highest value memories")
+            self.console.print("  /memory recent [n]             - Show recently accessed memories")
+            self.console.print("  /memory categories             - List all categories")
+            self.console.print("  /memory view <id>              - View a single memory in detail")
+            self.console.print("  /memory edit <id> <content>    - Edit memory content")
+            self.console.print("  /memory tag <id> <tags...>     - Set tags for a memory")
+            self.console.print("  /memory category <id> <cat>    - Change memory category")
+            self.console.print("  /memory priority <id> <1-10>   - Set memory importance")
+            self.console.print("  /memory related <id>           - Find related memories")
+            self.console.print("  /memory forget <id>            - Delete a memory")
+            self.console.print("  /memory restore <id>           - Restore an archived memory")
+            self.console.print("  /memory compress               - Run auction compression")
+            self.console.print("  /memory clear --force          - Delete ALL memories")
+            self.console.print("  /memory stats                  - Show statistics")
+            self.console.print("  /memory branch                 - List branches with memories")
+            self.console.print("  /memory merge <from> <to>      - Merge branch memories")
+            self.console.print("  /memory export <file.json>     - Export memories to JSON")
+            self.console.print("  /memory import <file.json>     - Import memories from JSON")
             return
 
         cmd = args[0]
 
         if cmd == "remember" and len(args) > 1:
-            text = " ".join(args[1:])
-            memory_id = self.memory_manager.remember(text)
+            # Parse arguments: text [--cat category] [--tags tag1,tag2]
+            raw_text = " ".join(args[1:])
+            category = "context"
+            tags = []
+            text = raw_text
+
+            # Simple parsing for --cat and --tags
+            if " --cat " in raw_text:
+                parts = raw_text.split(" --cat ")
+                text = parts[0].strip()
+                cat_and_rest = parts[1].strip()
+                if " --tags " in cat_and_rest:
+                    cat_parts = cat_and_rest.split(" --tags ")
+                    category = cat_parts[0].strip()
+                    tags = [t.strip() for t in cat_parts[1].strip().split(",") if t.strip()]
+                else:
+                    category = cat_and_rest
+            elif " --tags " in raw_text:
+                parts = raw_text.split(" --tags ")
+                text = parts[0].strip()
+                tags = [t.strip() for t in parts[1].strip().split(",") if t.strip()]
+
+            if not text:
+                self.console.print("[yellow]Usage: /memory remember <text> [--cat <category>] [--tags <tag1,tag2>][/yellow]")
+                return
+
+            # Check for duplicates
+            similar = self.memory_manager.find_similar(text)
+            if similar:
+                self.console.print(f"[yellow]⚠ Similar memories found ({len(similar)}):[/yellow]")
+                for mem in similar[:3]:
+                    content = mem.content[:50] + "..." if len(mem.content) > 50 else mem.content
+                    self.console.print(f"  [dim]{mem.id[:8]}: {content}[/dim]")
+                self.console.print("[dim]Consider updating existing memory with /memory edit[/dim]")
+
+            memory_id = self.memory_manager.remember(text, category=category, tags=tags)
             self.console.print(f"[bold green]✓ Memory recorded ({memory_id})[/bold green]")
+            if category != "context":
+                self.console.print(f"[dim]  Category: {category}[/dim]")
+            if tags:
+                self.console.print(f"[dim]  Tags: {', '.join(tags)}[/dim]")
 
         elif cmd == "recall" and len(args) > 1:
             query = " ".join(args[1:])
             memories = self.memory_manager.recall(query)
             if memories:
-                table = Table("ID", "Content", "Score")
+                table = Table("ID", "Category", "Content", "Score", "Access")
                 for mem in memories:
-                    content = mem.content[:50] + "..." if len(mem.content) > 50 else mem.content
-                    table.add_row(mem.id[:8], content, f"{mem.value_score:.2f}")
+                    content = mem.content[:40] + "..." if len(mem.content) > 40 else mem.content
+                    table.add_row(mem.id[:8], mem.category, content, f"{mem.value_score:.2f}", str(mem.access_count))
                 self.console.print(table)
             else:
                 self.console.print("[yellow]No memories found.[/yellow]")
 
         elif cmd == "list":
-            memories = self.memory_manager.list_all()
+            category_filter = args[1] if len(args) > 1 else None
+            memories = self.memory_manager.recall(query="", category=category_filter, limit=10000)
             if memories:
-                table = Table("ID", "Category", "Content", "Score", "Access")
-                for mem in memories[:20]:  # Show first 20
+                title = f"Memories ({category_filter})" if category_filter else "Memories"
+                table = Table("ID", "Category", "Content", "Score", "Access", title=title)
+                for mem in memories[:30]:
                     content = mem.content[:40] + "..." if len(mem.content) > 40 else mem.content
-                    table.add_row(mem.id[:8], mem.category, content, f"{mem.value_score:.2f}", str(mem.access_count))
+                    archived = "[dim]A[/dim]" if getattr(mem, 'compressed', False) else ""
+                    table.add_row(mem.id[:8], mem.category, content, f"{mem.value_score:.2f}", str(mem.access_count), archived)
                 self.console.print(table)
-                if len(memories) > 20:
-                    self.console.print(f"[dim]... and {len(memories) - 20} more memories[/dim]")
+                if len(memories) > 30:
+                    self.console.print(f"[dim]... and {len(memories) - 30} more memories[/dim]")
+            else:
+                msg = f"[yellow]No memories in category '{category_filter}'.[/yellow]" if category_filter else "[yellow]No memories stored.[/yellow]"
+                self.console.print(msg)
+
+        elif cmd == "search" and len(args) > 1:
+            # Parse advanced search: query [--cat c] [--tags t1,t2] [--min-score 0.5] [--min-importance 5]
+            raw_query = " ".join(args[1:])
+            query = raw_query
+            category = None
+            tags = []
+            min_score = 0.0
+            min_importance = 0
+
+            # Parse options
+            if " --cat " in raw_query:
+                parts = raw_query.split(" --cat ")
+                query = parts[0].strip()
+                rest = parts[1].strip()
+                # Extract category until next -- option
+                cat_end = len(rest)
+                for opt in [" --tags ", " --min-score ", " --min-importance "]:
+                    idx = rest.find(opt)
+                    if idx != -1 and idx < cat_end:
+                        cat_end = idx
+                category = rest[:cat_end].strip()
+                rest = rest[cat_end:].strip()
+            else:
+                rest = ""
+
+            if " --tags " in (rest or raw_query):
+                parts = (rest or raw_query).split(" --tags ")
+                if not rest:
+                    query = parts[0].strip()
+                tag_str = parts[1].strip()
+                # Extract tags until next -- option
+                tag_end = len(tag_str)
+                for opt in [" --min-score ", " --min-importance "]:
+                    idx = tag_str.find(opt)
+                    if idx != -1 and idx < tag_end:
+                        tag_end = idx
+                tags = [t.strip() for t in tag_str[:tag_end].strip().split(",") if t.strip()]
+                rest = tag_str[tag_end:].strip()
+
+            if " --min-score " in (rest or raw_query):
+                parts = (rest or raw_query).split(" --min-score ")
+                score_str = parts[1].strip()
+                score_end = len(score_str)
+                for opt in [" --min-importance "]:
+                    idx = score_str.find(opt)
+                    if idx != -1 and idx < score_end:
+                        score_end = idx
+                try:
+                    min_score = float(score_str[:score_end].strip())
+                except ValueError:
+                    pass
+
+            if " --min-importance " in (rest or raw_query):
+                parts = (rest or raw_query).split(" --min-importance ")
+                try:
+                    min_importance = int(parts[1].strip().split()[0])
+                except (ValueError, IndexError):
+                    pass
+
+            memories = self.memory_manager.advanced_search(
+                query=query, category=category, tags=tags if tags else None,
+                min_score=min_score, min_importance=min_importance, limit=50
+            )
+            if memories:
+                table = Table("ID", "Category", "Content", "Score", "Imp")
+                for mem in memories:
+                    content = mem.content[:40] + "..." if len(mem.content) > 40 else mem.content
+                    table.add_row(mem.id[:8], mem.category, content, f"{mem.value_score:.2f}", str(mem.importance))
+                self.console.print(table)
+                self.console.print(f"[dim]Found {len(memories)} result(s)[/dim]")
+            else:
+                self.console.print("[yellow]No memories found matching criteria.[/yellow]")
+
+        elif cmd == "top":
+            try:
+                limit = int(args[1]) if len(args) > 1 else 10
+            except ValueError:
+                limit = 10
+            memories = self.memory_manager.get_top_memories(limit)
+            if memories:
+                table = Table("#", "ID", "Category", "Content", "Score", title=f"Top {limit} Memories")
+                for i, mem in enumerate(memories, 1):
+                    content = mem.content[:40] + "..." if len(mem.content) > 40 else mem.content
+                    table.add_row(str(i), mem.id[:8], mem.category, content, f"{mem.value_score:.2f}")
+                self.console.print(table)
             else:
                 self.console.print("[yellow]No memories stored.[/yellow]")
+
+        elif cmd == "recent":
+            try:
+                limit = int(args[1]) if len(args) > 1 else 10
+            except ValueError:
+                limit = 10
+            memories = self.memory_manager.get_recent_memories(limit)
+            if memories:
+                table = Table("#", "ID", "Category", "Content", "Accessed", title=f"Recently Accessed Memories")
+                for i, mem in enumerate(memories, 1):
+                    content = mem.content[:40] + "..." if len(mem.content) > 40 else mem.content
+                    accessed = time.strftime('%Y-%m-%d %H:%M', time.localtime(mem.last_accessed)) if mem.last_accessed else "Never"
+                    table.add_row(str(i), mem.id[:8], mem.category, content, accessed)
+                self.console.print(table)
+            else:
+                self.console.print("[yellow]No recently accessed memories.[/yellow]")
+
+        elif cmd == "categories":
+            categories = self.memory_manager.get_categories()
+            if categories:
+                table = Table("Category", "Count", title="Memory Categories")
+                for cat, count in categories:
+                    table.add_row(cat, str(count))
+                self.console.print(table)
+            else:
+                self.console.print("[yellow]No memories stored.[/yellow]")
+
+        elif cmd == "related" and len(args) > 1:
+            memory_id = args[1]
+            source = self.memory_manager._store.get_memory(memory_id)
+            if not source:
+                self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+            else:
+                related = self.memory_manager.get_related(memory_id)
+                if related:
+                    table = Table("ID", "Category", "Content", "Score")
+                    for mem in related:
+                        content = mem.content[:50] + "..." if len(mem.content) > 50 else mem.content
+                        table.add_row(mem.id[:8], mem.category, content, f"{mem.value_score:.2f}")
+                    self.console.print(f"[bold cyan]Memories related to {memory_id}:[/bold cyan]")
+                    self.console.print(table)
+                else:
+                    self.console.print("[yellow]No related memories found.[/yellow]")
+
+        elif cmd == "view" and len(args) > 1:
+            memory_id = args[1]
+            mem = self.memory_manager._store.get_memory(memory_id)
+            if mem:
+                self.console.print(f"\n[bold cyan]Memory: {mem.id}[/bold cyan]")
+                self.console.print(f"  Category: {mem.category}")
+                self.console.print(f"  Importance: {mem.importance}/10")
+                self.console.print(f"  Score: {mem.value_score:.2f}")
+                self.console.print(f"  Access count: {mem.access_count}")
+                self.console.print(f"  Tags: {', '.join(mem.tags) if mem.tags else '(none)'}")
+                self.console.print(f"  Branch: {mem.branch or '(global)'}")
+                self.console.print(f"  Created: {time.strftime('%Y-%m-%d %H:%M', time.localtime(mem.created_at))}")
+                if mem.compressed:
+                    self.console.print(f"  [dim]Status: Compressed[/dim]")
+                self.console.print(f"\n[bold]Content:[/bold]\n{mem.content}\n")
+            else:
+                self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+
+        elif cmd == "edit" and len(args) > 2:
+            memory_id = args[1]
+            new_content = " ".join(args[2:])
+            if self.memory_manager.update_memory(memory_id, content=new_content):
+                self.console.print(f"[bold green]✓ Memory updated[/bold green]")
+            else:
+                self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+
+        elif cmd == "tag" and len(args) > 2:
+            memory_id = args[1]
+            new_tags = args[2:]
+            if self.memory_manager.update_memory(memory_id, tags=list(new_tags)):
+                self.console.print(f"[bold green]✓ Tags updated: {', '.join(new_tags)}[/bold green]")
+            else:
+                self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+
+        elif cmd == "category" and len(args) > 2:
+            memory_id = args[1]
+            new_category = args[2]
+            if self.memory_manager.update_memory(memory_id, category=new_category):
+                self.console.print(f"[bold green]✓ Category updated to '{new_category}'[/bold green]")
+            else:
+                self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+
+        elif cmd == "priority" and len(args) > 2:
+            memory_id = args[1]
+            try:
+                importance = int(args[2])
+                if 1 <= importance <= 10:
+                    if self.memory_manager.update_memory(memory_id, importance=importance):
+                        self.console.print(f"[bold green]✓ Importance set to {importance}/10[/bold green]")
+                    else:
+                        self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+                else:
+                    self.console.print("[yellow]Importance must be between 1 and 10.[/yellow]")
+            except ValueError:
+                self.console.print("[yellow]Importance must be a number between 1 and 10.[/yellow]")
 
         elif cmd == "forget" and len(args) > 1:
             memory_id = args[1]
@@ -1208,18 +1452,78 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             else:
                 self.console.print(f"[bold red]Memory not found[/bold red]")
 
+        elif cmd == "restore" and len(args) > 1:
+            memory_id = args[1]
+            if self.memory_manager.restore(memory_id):
+                self.console.print(f"[bold green]✓ Memory restored[/bold green]")
+            else:
+                self.console.print(f"[bold red]Memory '{memory_id}' not found or not archived.[/bold red]")
+
         elif cmd == "compress":
-            archived = self.memory_manager.compress()
+            archived = self.memory_manager.compress_memories()
             self.console.print(f"[bold green]✓ Compressed {archived} memories (archived low-value memories)[/bold green]")
 
+        elif cmd == "clear":
+            self.console.print("[bold red]⚠️ This will delete ALL memories permanently![/bold red]")
+            self.console.print("[yellow]Type 'yes' to confirm, or anything else to cancel:[/yellow]")
+            # Simple confirmation using prompt_toolkit's application prompt
+            # Since we can't easily do interactive confirmation in async context,
+            # we'll use a simpler approach - require "--force" flag
+            if len(args) > 1 and args[1] == "--force":
+                count = self.memory_manager.clear_all()
+                self.console.print(f"[bold green]✓ Cleared {count} memories[/bold green]")
+            else:
+                self.console.print("[dim]Run '/memory clear --force' to confirm deletion.[/dim]")
+
         elif cmd == "stats":
-            stats = self.memory_manager.stats()
+            stats = self.memory_manager.get_stats()
             self.console.print(Panel(
-                f"Total memories: {stats.get('total', 0)}\n"
-                f"Active: {stats.get('active', 0)} | Archived: {stats.get('archived', 0)}\n"
-                f"Average score: {stats.get('avg_score', 0):.2f}",
+                f"Total memories: {stats.get('total_memories', 0)}\n"
+                f"Active: {stats.get('active_memories', 0)} | Archived: {stats.get('archived_memories', 0)}\n"
+                f"Global: {stats.get('global_memories', 0)} | Branches: {stats.get('branches', 0)}\n"
+                f"Average score: {stats.get('average_score', 0):.2f}",
                 title="Memory Statistics"
             ))
+
+        elif cmd == "branch":
+            branches = self.branch_memory_manager.list_branches_with_memories()
+            current = self.branch_memory_manager.get_current_branch() or "(none)"
+            if branches:
+                self.console.print(f"[bold cyan]Current branch:[/bold cyan] {current}")
+                table = Table("Branch", "Status")
+                for branch in branches:
+                    status = "[bold yellow]← current[/bold yellow]" if branch == current else ""
+                    table.add_row(branch, status)
+                self.console.print(table)
+            else:
+                self.console.print(f"[yellow]No branch-specific memories. Current branch: {current}[/yellow]")
+
+        elif cmd == "merge" and len(args) >= 3:
+            from_branch = args[1]
+            to_branch = args[2]
+            count = self.branch_memory_manager.merge_branch_memories(from_branch, to_branch)
+            self.console.print(f"[bold green]✓ Merged {count} memories from '{from_branch}' to '{to_branch}'[/bold green]")
+
+        elif cmd == "export" and len(args) > 1:
+            file_path = Path(args[1])
+            if not file_path.suffix:
+                file_path = file_path.with_suffix(".json")
+            count = self.memory_manager.export_memories(file_path)
+            if count > 0:
+                self.console.print(f"[bold green]✓ Exported {count} memories to {file_path}[/bold green]")
+            else:
+                self.console.print(f"[yellow]No memories to export or export failed.[/yellow]")
+
+        elif cmd == "import" and len(args) > 1:
+            file_path = Path(args[1])
+            if not file_path.exists():
+                self.console.print(f"[bold red]File not found: {file_path}[/bold red]")
+            else:
+                count = self.memory_manager.import_memories(file_path)
+                if count > 0:
+                    self.console.print(f"[bold green]✓ Imported {count} memories from {file_path}[/bold green]")
+                else:
+                    self.console.print(f"[yellow]No memories imported or import failed.[/yellow]")
 
         else:
             self.console.print("[yellow]Unknown memory command. Type /memory for usage.[/yellow]")
@@ -1294,10 +1598,17 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         if not (provider := self.provider_factory.get_provider(self.current_model)): self.console.print(f"[bold red]Error: Provider for '{self.current_model}' not found.[/bold red]"); return
         self.session_messages.append({"role": "user", "content": prompt})
         prompt_tokens = self._count_tokens(prompt)
-        
+
+        # [Memory Injection] Recall relevant memories and inject into context
+        memory_context = await self._inject_memory_context(prompt)
+        temp_memory_msg = None
+        if memory_context:
+            temp_memory_msg = {"role": "system", "content": memory_context}
+            self.session_messages.insert(-1, temp_memory_msg)
+
         # [V2.2.1] Removed smart cleaning. The exact model name is used.
         provider_name, model_name = self.current_model.split('/', 1)
-        
+
         full_response, start_time = "", time.time()
         try:
             self.console.print("[bold magenta]AI:[/bold magenta] ", end="")
@@ -1311,12 +1622,38 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             except Exception: error_body = str(e)
             self.console.print(f"\n[bold red]API Error {e.response.status_code}:[/bold red] {error_body}"); self.session_messages.pop(); return
         except Exception as e: self.console.print(f"\n[bold red]Error: {e}[/bold red]"); self.session_messages.pop(); return
+        finally:
+            if temp_memory_msg and temp_memory_msg in self.session_messages:
+                self.session_messages.remove(temp_memory_msg)
         self.session_messages.append({"role": "assistant", "content": full_response})
         self._manage_message_history()  # Manage message history after adding response
         cost = provider.calculate_cost(prompt_tokens, self._count_tokens(full_response), model_name)
         if cost is not None: self.session_cost += cost
         self.console.print(f"[dim]Time: {(time.time() - start_time):.2f}s | Cost: {'N/A' if cost is None else f'${cost:.6f}'}[/dim]")
         
+    async def _inject_memory_context(self, prompt: str) -> str:
+        """Recall relevant memories and format them for injection into chat context."""
+        try:
+            related_memories = self.memory_manager.recall(
+                query=prompt,
+                branch=BranchMemoryManager.get_current_branch(),
+                limit=5
+            )
+            if not related_memories:
+                return ""
+
+            # Update access stats for recalled memories
+            for mem in related_memories:
+                self.memory_manager.touch_memory(mem.id)
+
+            lines = ["[Relevant context from memory:]"]
+            for mem in related_memories:
+                content = mem.content[:150] + "..." if len(mem.content) > 150 else mem.content
+                lines.append(f"- [{mem.category}] {content}")
+            return "\n".join(lines)
+        except Exception:
+            return ""
+
     async def close_providers(self):
         """Close all provider HTTP clients to free resources."""
         for provider in self.provider_factory.providers.values():
@@ -1651,6 +1988,7 @@ class MemoryEntry:
     tags: List[str] = field(default_factory=list)
     branch: Optional[str] = None  # None = global
     compressed: bool = False
+    content_compressed: str = ""
     original_length: int = 0
     value_score: float = 0.0
 
@@ -1832,7 +2170,7 @@ class SQLiteMemoryStore:
             # Full-text search
             if query:
                 # Use FTS5 for content search
-                conditions.append("m.id IN (SELECT rowid FROM memories_fts WHERE content MATCH ?)")
+                conditions.append("m.rowid IN (SELECT rowid FROM memories_fts WHERE content MATCH ?)")
                 params.append(query)
 
             if branch is not None:
@@ -1852,18 +2190,18 @@ class SQLiteMemoryStore:
 
             with self._get_connection() as conn:
                 rows = conn.execute(f'''
-                    SELECT m.* FROM memories m
+                    SELECT m.*, GROUP_CONCAT(mt.tag) as tags_str
+                    FROM memories m
+                    LEFT JOIN memory_tags mt ON m.id = mt.memory_id
                     WHERE {where_clause}
+                    GROUP BY m.id
                     ORDER BY m.value_score DESC, m.accessed_at DESC
                     LIMIT ?
                 ''', params + [limit]).fetchall()
 
                 results = []
                 for row in rows:
-                    memory_id = row['id']
-                    tags_list = [r['tag'] for r in conn.execute(
-                        'SELECT tag FROM memory_tags WHERE memory_id = ?', (memory_id,)
-                    )]
+                    tags_list = row['tags_str'].split(',') if row['tags_str'] else []
                     results.append(self._row_to_entry(row, tags_list))
 
                 return results
@@ -1892,7 +2230,7 @@ class SQLiteMemoryStore:
                         original_length = ?
                     WHERE id = ?
                 ''', (
-                    entry.content, None, entry.category, entry.source,
+                    entry.content, entry.content_compressed, entry.category, entry.source,
                     entry.branch, entry.updated_at,
                     entry.last_accessed if entry.last_accessed else None,
                     entry.access_count, entry.importance, entry.value_score,
@@ -1926,6 +2264,31 @@ class SQLiteMemoryStore:
             logging.error(f"Failed to delete memory: {e}")
             return False
 
+    def restore_memory(self, memory_id: str) -> bool:
+        """Restore an archived memory."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.execute(
+                    'UPDATE memories SET is_archived = 0 WHERE id = ?',
+                    (memory_id,)
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"Failed to restore memory: {e}")
+            return False
+
+    def clear_all_memories(self) -> int:
+        """Delete all memories. Returns count deleted."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.execute('DELETE FROM memories')
+                conn.commit()
+                return cursor.rowcount
+        except sqlite3.Error as e:
+            logging.error(f"Failed to clear memories: {e}")
+            return 0
+
     def archive_old_memories(self, min_score: float, days_old: int) -> int:
         """Archive memories below score threshold and older than specified days."""
         try:
@@ -1943,6 +2306,176 @@ class SQLiteMemoryStore:
         except sqlite3.Error as e:
             logging.error(f"Failed to archive memories: {e}")
             return 0
+
+    def get_all_categories(self) -> List[Tuple[str, int]]:
+        """Get all categories with their memory counts."""
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute('''
+                    SELECT category, COUNT(*) as count
+                    FROM memories
+                    WHERE is_archived = 0
+                    GROUP BY category
+                    ORDER BY count DESC
+                ''').fetchall()
+                return [(r['category'], r['count']) for r in rows]
+        except sqlite3.Error as e:
+            logging.error(f"Failed to get categories: {e}")
+            return []
+
+    def find_similar(self, content: str, threshold: float = 0.8) -> List[MemoryEntry]:
+        """Find memories with similar content using simple word overlap."""
+        try:
+            words = set(content.lower().split())
+            if not words:
+                return []
+
+            with self._get_connection() as conn:
+                rows = conn.execute('''
+                    SELECT m.*, GROUP_CONCAT(mt.tag) as tags_str
+                    FROM memories m
+                    LEFT JOIN memory_tags mt ON m.id = mt.memory_id
+                    WHERE m.is_archived = 0
+                    GROUP BY m.id
+                ''').fetchall()
+
+                results = []
+                for row in rows:
+                    mem_words = set(row['content'].lower().split())
+                    if not mem_words:
+                        continue
+                    overlap = len(words & mem_words) / max(len(words), len(mem_words))
+                    if overlap >= threshold:
+                        tags_list = row['tags_str'].split(',') if row['tags_str'] else []
+                        results.append((self._row_to_entry(row, tags_list), overlap))
+
+                results.sort(key=lambda x: x[1], reverse=True)
+                return [entry for entry, _ in results[:5]]
+        except sqlite3.Error as e:
+            logging.error(f"Failed to find similar memories: {e}")
+            return []
+
+    def get_top_memories(self, limit: int = 10) -> List[MemoryEntry]:
+        """Get highest value memories."""
+        return self.search_memories(query="", limit=limit)
+
+    def get_recent_memories(self, limit: int = 10) -> List[MemoryEntry]:
+        """Get recently accessed memories."""
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute('''
+                    SELECT m.*, GROUP_CONCAT(mt.tag) as tags_str
+                    FROM memories m
+                    LEFT JOIN memory_tags mt ON m.id = mt.memory_id
+                    WHERE m.is_archived = 0 AND m.accessed_at IS NOT NULL
+                    GROUP BY m.id
+                    ORDER BY m.accessed_at DESC
+                    LIMIT ?
+                ''', (limit,)).fetchall()
+
+                results = []
+                for row in rows:
+                    tags_list = row['tags_str'].split(',') if row['tags_str'] else []
+                    results.append(self._row_to_entry(row, tags_list))
+                return results
+        except sqlite3.Error as e:
+            logging.error(f"Failed to get recent memories: {e}")
+            return []
+
+    def get_related_memories(self, memory_id: str, limit: int = 5) -> List[MemoryEntry]:
+        """Get memories related by tags or category."""
+        try:
+            source = self.get_memory(memory_id)
+            if not source:
+                return []
+
+            with self._get_connection() as conn:
+                # Find memories sharing tags or category, excluding self
+                rows = conn.execute('''
+                    SELECT m.*, GROUP_CONCAT(mt.tag) as tags_str,
+                           COUNT(DISTINCT mt2.tag) as tag_matches
+                    FROM memories m
+                    LEFT JOIN memory_tags mt ON m.id = mt.memory_id
+                    LEFT JOIN memory_tags mt2 ON m.id = mt2.memory_id
+                        AND mt2.tag IN (
+                            SELECT tag FROM memory_tags WHERE memory_id = ?
+                        )
+                    WHERE m.id != ? AND m.is_archived = 0
+                        AND (m.category = ? OR mt2.tag IS NOT NULL)
+                    GROUP BY m.id
+                    ORDER BY tag_matches DESC, m.value_score DESC
+                    LIMIT ?
+                ''', (memory_id, memory_id, source.category, limit)).fetchall()
+
+                results = []
+                for row in rows:
+                    tags_list = row['tags_str'].split(',') if row['tags_str'] else []
+                    results.append(self._row_to_entry(row, tags_list))
+                return results
+        except sqlite3.Error as e:
+            logging.error(f"Failed to get related memories: {e}")
+            return []
+
+    def advanced_search(self, query: str, branch: Optional[str] = None,
+                        category: Optional[str] = None, tags: List[str] = None,
+                        min_score: float = 0.0, min_importance: int = 0,
+                        limit: int = 10) -> List[MemoryEntry]:
+        """Advanced search with multiple filters."""
+        try:
+            conditions = []
+            params = []
+
+            if query:
+                conditions.append("m.rowid IN (SELECT rowid FROM memories_fts WHERE content MATCH ?)")
+                params.append(query)
+
+            if branch is not None:
+                conditions.append("m.branch = ?")
+                params.append(branch)
+            else:
+                conditions.append("m.branch IS NULL")
+
+            if category:
+                conditions.append("m.category = ?")
+                params.append(category)
+
+            if tags:
+                placeholders = ','.join('?' * len(tags))
+                conditions.append(f"m.id IN (SELECT memory_id FROM memory_tags WHERE tag IN ({placeholders}) GROUP BY memory_id HAVING COUNT(*) >= ?)")
+                params.extend(tags)
+                params.append(len(tags))
+
+            conditions.append("m.is_archived = 0")
+
+            if min_score > 0:
+                conditions.append("m.value_score >= ?")
+                params.append(min_score)
+
+            if min_importance > 0:
+                conditions.append("m.importance >= ?")
+                params.append(min_importance)
+
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+            with self._get_connection() as conn:
+                rows = conn.execute(f'''
+                    SELECT m.*, GROUP_CONCAT(mt.tag) as tags_str
+                    FROM memories m
+                    LEFT JOIN memory_tags mt ON m.id = mt.memory_id
+                    WHERE {where_clause}
+                    GROUP BY m.id
+                    ORDER BY m.value_score DESC, m.accessed_at DESC
+                    LIMIT ?
+                ''', params + [limit]).fetchall()
+
+                results = []
+                for row in rows:
+                    tags_list = row['tags_str'].split(',') if row['tags_str'] else []
+                    results.append(self._row_to_entry(row, tags_list))
+                return results
+        except sqlite3.Error as e:
+            logging.error(f"Failed advanced search: {e}")
+            return []
 
     def get_stats(self) -> Dict[str, Any]:
         """Get database statistics."""
@@ -1968,9 +2501,11 @@ class SQLiteMemoryStore:
 
     def _row_to_entry(self, row: sqlite3.Row, tags: List[str]) -> MemoryEntry:
         """Convert a database row to MemoryEntry."""
+        is_compressed = bool(row['is_compressed'])
+        content = row['content_compressed'] if is_compressed and row['content_compressed'] else row['content']
         return MemoryEntry(
             id=row['id'],
-            content=row['content'],
+            content=content,
             category=row['category'],
             source=row['source'] or '',
             created_at=row['created_at'],
@@ -1980,7 +2515,8 @@ class SQLiteMemoryStore:
             importance=row['importance'],
             tags=tags,
             branch=row['branch'],
-            compressed=bool(row['is_compressed']),
+            compressed=is_compressed,
+            content_compressed=row['content_compressed'] or '',
             original_length=row['original_length'],
             value_score=row['value_score'] or 0.0
         )
@@ -2079,7 +2615,7 @@ class MemoryManager:
         )
 
         # Calculate initial value score
-        self._auction.calculate_value_score(entry)
+        entry.compute_value_score()
 
         if self._store.insert_memory(entry):
             return memory_id
@@ -2104,6 +2640,8 @@ class MemoryManager:
         """Delete a memory."""
         return self._store.delete_memory(memory_id)
 
+    ALLOWED_UPDATE_FIELDS = {'content', 'category', 'importance', 'tags'}
+
     def update_memory(self, memory_id: str, **kwargs) -> bool:
         """Update a memory's fields."""
         entry = self._store.get_memory(memory_id)
@@ -2111,7 +2649,7 @@ class MemoryManager:
             return False
 
         for key, value in kwargs.items():
-            if hasattr(entry, key):
+            if key in self.ALLOWED_UPDATE_FIELDS and hasattr(entry, key):
                 setattr(entry, key, value)
 
         entry.updated_at = time.time()
@@ -2131,6 +2669,134 @@ class MemoryManager:
                 return True
         except sqlite3.Error:
             return False
+
+    def restore(self, memory_id: str) -> bool:
+        """Restore an archived memory."""
+        return self._store.restore_memory(memory_id)
+
+    def clear_all(self) -> int:
+        """Delete all memories."""
+        return self._store.clear_all_memories()
+
+    def export_memories(self, file_path: Path) -> int:
+        """Export all memories to a JSON file."""
+        try:
+            memories = self._store.search_memories(
+                query="", branch=None, include_archived=True, limit=100000
+            )
+            data = []
+            for mem in memories:
+                data.append({
+                    "id": mem.id,
+                    "content": mem.content,
+                    "category": mem.category,
+                    "source": mem.source,
+                    "created_at": mem.created_at,
+                    "updated_at": mem.updated_at,
+                    "access_count": mem.access_count,
+                    "last_accessed": mem.last_accessed,
+                    "importance": mem.importance,
+                    "tags": mem.tags,
+                    "branch": mem.branch,
+                    "compressed": mem.compressed,
+                    "content_compressed": mem.content_compressed,
+                    "original_length": mem.original_length,
+                    "value_score": mem.value_score
+                })
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump({"memories": data, "export_time": time.time()}, f, indent=2)
+            return len(data)
+        except Exception as e:
+            logging.error(f"Failed to export memories: {e}")
+            return 0
+
+    def import_memories(self, file_path: Path) -> int:
+        """Import memories from a JSON file."""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            memories = data.get("memories", [])
+            imported = 0
+            for item in memories:
+                # Generate new unique ID to avoid conflicts
+                new_id = f"mem_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+                entry = MemoryEntry(
+                    id=new_id,
+                    content=item.get("content", ""),
+                    category=item.get("category", "general"),
+                    source=item.get("source", "imported"),
+                    created_at=item.get("created_at", time.time()),
+                    updated_at=item.get("updated_at", time.time()),
+                    access_count=item.get("access_count", 0),
+                    last_accessed=item.get("last_accessed", 0),
+                    importance=item.get("importance", 5),
+                    tags=item.get("tags", []),
+                    branch=item.get("branch"),
+                    compressed=item.get("compressed", False),
+                    content_compressed=item.get("content_compressed", ""),
+                    original_length=item.get("original_length", 0),
+                    value_score=item.get("value_score", 0.0)
+                )
+                if self._store.insert_memory(entry):
+                    imported += 1
+            return imported
+        except Exception as e:
+            logging.error(f"Failed to import memories: {e}")
+            return 0
+
+    def get_categories(self) -> List[Tuple[str, int]]:
+        """Get all categories with memory counts."""
+        return self._store.get_all_categories()
+
+    def find_similar(self, content: str) -> List[MemoryEntry]:
+        """Find memories with similar content."""
+        return self._store.find_similar(content)
+
+    def get_top_memories(self, limit: int = 10) -> List[MemoryEntry]:
+        """Get highest value memories."""
+        return self._store.get_top_memories(limit)
+
+    def get_recent_memories(self, limit: int = 10) -> List[MemoryEntry]:
+        """Get recently accessed memories."""
+        return self._store.get_recent_memories(limit)
+
+    def get_related(self, memory_id: str, limit: int = 5) -> List[MemoryEntry]:
+        """Get memories related by tags or category."""
+        return self._store.get_related_memories(memory_id, limit)
+
+    def advanced_search(self, query: str = "", category: Optional[str] = None,
+                        tags: List[str] = None, min_score: float = 0.0,
+                        min_importance: int = 0, limit: int = 10) -> List[MemoryEntry]:
+        """Advanced search with multiple filters."""
+        return self._store.advanced_search(
+            query=query,
+            branch=self._current_branch,
+            category=category,
+            tags=tags,
+            min_score=min_score,
+            min_importance=min_importance,
+            limit=limit
+        )
+
+    def get_current_branch(self) -> Optional[str]:
+        """Get the current branch."""
+        return self._current_branch
+
+    def set_current_branch(self, branch: Optional[str]) -> None:
+        """Set the current branch."""
+        self._current_branch = branch
+
+    def list_branches(self) -> List[str]:
+        """List all branches that have memories."""
+        try:
+            with self._store._get_connection() as conn:
+                rows = conn.execute(
+                    'SELECT DISTINCT branch FROM memories WHERE branch IS NOT NULL'
+                ).fetchall()
+                return [r['branch'] for r in rows if r['branch']]
+        except sqlite3.Error:
+            return []
 
     def compress_memories(self, branch: Optional[str] = None) -> int:
         """Run auction-based compression."""
@@ -2155,7 +2821,7 @@ class MemoryManager:
         for entry in compress:
             if not entry.compressed:
                 entry.compressed = True
-                entry.content = self._summarize_content(entry.content)
+                entry.content_compressed = self._summarize_content(entry.content)
                 self._store.update_memory(entry)
                 compressed_count += 1
 
@@ -2184,29 +2850,28 @@ class BranchMemoryManager:
         self._repo_path: Optional[Path] = None
         self._detect_git_repo()
 
-    def _detect_git_repo(self) -> Optional[Path]:
+    @staticmethod
+    def _detect_git_repo() -> Optional[Path]:
         """Detect if we're in a git repo, return the repo path or None."""
         try:
-            # Look for .git directory
             cwd = Path.cwd()
             for path in [cwd] + list(cwd.parents):
                 git_dir = path / ".git"
                 if git_dir.exists() and git_dir.is_dir():
-                    self._repo_path = path
                     return path
-            self._repo_path = None
             return None
         except Exception:
-            self._repo_path = None
             return None
 
-    def get_current_branch(self) -> Optional[str]:
-        """Get current git branch name."""
-        if not self._repo_path:
+    @classmethod
+    def get_current_branch(cls) -> Optional[str]:
+        """Get current git branch name without requiring a MemoryManager instance."""
+        repo_path = cls._detect_git_repo()
+        if not repo_path:
             return None
 
         try:
-            git_head = self._repo_path / ".git" / "HEAD"
+            git_head = repo_path / ".git" / "HEAD"
             if not git_head.exists():
                 return None
 
@@ -2220,16 +2885,17 @@ class BranchMemoryManager:
     def sync_branch_memories(self) -> None:
         """Sync memories when switching branches."""
         current_branch = self.get_current_branch()
-        if current_branch and current_branch != self._mm._current_branch:
+        mm_branch = self._mm.get_current_branch()
+        if current_branch and current_branch != mm_branch:
             # Update current branch in memory manager
-            self._mm._current_branch = current_branch
+            self._mm.set_current_branch(current_branch)
             logging.info(f"Switched to branch: {current_branch}")
 
     def merge_branch_memories(self, from_branch: str, to_branch: str) -> int:
         """Merge memories from one branch to another."""
         try:
             # Get all memories from source branch
-            from_memories = self._mm._store.search_memories(
+            from_memories = self._mm.recall(
                 query="", branch=from_branch, limit=10000
             )
 
@@ -2254,14 +2920,7 @@ class BranchMemoryManager:
 
     def list_branches_with_memories(self) -> List[str]:
         """List all branches that have memories."""
-        try:
-            with self._mm._store._get_connection() as conn:
-                rows = conn.execute(
-                    'SELECT DISTINCT branch FROM memories WHERE branch IS NOT NULL'
-                ).fetchall()
-                return [r['branch'] for r in rows if r['branch']]
-        except sqlite3.Error:
-            return []
+        return self._mm.list_branches()
 
 
 @dataclass

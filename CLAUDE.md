@@ -187,7 +187,8 @@ FreeChat includes an advanced memory system for long-term context preservation a
 - `/memory forget <id>` - Delete specific memory
 - `/memory compress` - Run auction compression
 - `/memory stats` - Display statistics
-- `/memory branch <name>` - Show branch-specific memories
+- `/memory branch` - List branches with memories
+- `/memory merge <from> <to>` - Merge branch memories
 
 ### Value Scoring (Auction Algorithm)
 
@@ -198,6 +199,14 @@ Memories are scored using weighted factors:
 - **Frequency** (10%): Normalized access count
 
 Low-value memories are archived when storage limits are reached.
+
+### Memory Context Injection
+
+Memories are automatically recalled and injected into the chat context before each user message. The system searches for memories related to the user's query (up to 5 most relevant) and prepends them as a system context message. Recalled memories have their access counts updated automatically.
+
+### Compression Behavior
+
+When compression runs, low-value memories have their content preserved in the `content_compressed` column while the original `content` remains intact. The `_row_to_entry()` method automatically returns the compressed content when `is_compressed = 1`.
 
 ## Important Implementation Details
 

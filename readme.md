@@ -260,13 +260,28 @@ mv ~/.config/freechat/* /path/to/your/script/freechat_config/
 FreeChat includes an advanced memory system for long-term context preservation across sessions.
 
 **Memory Commands:**
-- `/memory remember <text>` - Store a new memory with automatic categorization
+- `/memory remember <text> [--cat <category>] [--tags <t1,t2>]` - Store a new memory with optional category and tags (auto-detects duplicates)
 - `/memory recall <query>` - Search memories using full-text search
-- `/memory list` - List all memories with value scores and access counts
+- `/memory search <query> [opts]` - Advanced search with filters (`--cat`, `--tags`, `--min-score`, `--min-importance`)
+- `/memory list [category]` - List memories, optionally filter by category
+- `/memory top [n]` - Show highest value memories (default: 10)
+- `/memory recent [n]` - Show recently accessed memories (default: 10)
+- `/memory categories` - List all categories with memory counts
+- `/memory view <id>` - View a single memory in detail
+- `/memory edit <id> <content>` - Edit memory content
+- `/memory tag <id> <tags...>` - Set tags for a memory
+- `/memory category <id> <category>` - Change memory category
+- `/memory priority <id> <1-10>` - Set memory importance (1-10)
+- `/memory related <id>` - Find memories related by tags or category
 - `/memory forget <id>` - Delete a specific memory by ID
+- `/memory restore <id>` - Restore an archived memory
 - `/memory compress` - Run auction-based compression to archive low-value memories
+- `/memory clear --force` - Delete ALL memories permanently
 - `/memory stats` - Display memory statistics
-- `/memory branch <name>` - Show memories specific to a Git branch
+- `/memory branch` - List Git branches with memories
+- `/memory merge <from> <to>` - Merge memories from one branch to another
+- `/memory export <file.json>` - Export memories to JSON file
+- `/memory import <file.json>` - Import memories from JSON file
 
 The memory system uses SQLite with FTS5 full-text search and implements an auction algorithm for intelligent compression based on importance, relevance, recency, and access frequency.
 
@@ -300,13 +315,28 @@ FreeChat now supports exporting sessions with rendered Markdown content. When yo
 | `/export` | `<format>` | Export the current session to a file in the specified format. Supported formats: `md`, `json`, `html`, `md-rendered`. |
 | `/clear` | (none) | Clear the current terminal screen. |
 | `/exit` | (none) | Exit the FreeChat application. |
-| `/memory` | `remember <text>` | Store a new memory with automatic categorization. |
+| `/memory` | `remember <text> [--cat <c>] [--tags <t1,t2>]` | Store a new memory with optional category and tags (auto-detects duplicates). |
 | | `recall <query>` | Search memories using full-text search. |
-| | `list [branch]` | List all memories with value scores and access counts. |
+| | `search <query> [opts]` | Advanced search with filters (`--cat`, `--tags`, `--min-score`, `--min-importance`). |
+| | `list [category]` | List memories, optionally filter by category. |
+| | `top [n]` | Show highest value memories (default: 10). |
+| | `recent [n]` | Show recently accessed memories (default: 10). |
+| | `categories` | List all categories with memory counts. |
+| | `view <id>` | View a single memory in detail. |
+| | `edit <id> <content>` | Edit memory content. |
+| | `tag <id> <tags...>` | Set tags for a memory. |
+| | `category <id> <cat>` | Change memory category. |
+| | `priority <id> <1-10>` | Set memory importance (1-10). |
+| | `related <id>` | Find memories related by tags or category. |
 | | `forget <id>` | Delete a specific memory by ID. |
+| | `restore <id>` | Restore an archived memory. |
 | | `compress` | Run auction-based compression to archive low-value memories. |
-| | `stats` | Display memory statistics including total, active, and archived counts. |
-| | `branch <name>` | Show memories specific to a Git branch. |
+| | `clear --force` | Delete ALL memories permanently. |
+| | `stats` | Display memory statistics. |
+| | `branch` | List Git branches with memories. |
+| | `merge <from> <to>` | Merge memories from one branch to another. |
+| | `export <file.json>` | Export memories to JSON file. |
+| | `import <file.json>` | Import memories from JSON file. |
 | `/skill` | `list` | List all installed skills. |
 | | `install <path>` | Install a skill from a local directory. |
 | | `uninstall <name>` | Remove an installed skill. |
