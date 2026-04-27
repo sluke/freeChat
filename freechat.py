@@ -85,7 +85,9 @@ class FreeChatApp:
         "ERROR": logging.ERROR,
         "CRITICAL": logging.CRITICAL
     }
-    
+
+    _MODEL_FETCH_SEMAPHORE = asyncio.Semaphore(3)
+
     def __init__(self):
         self.console = Console()
         
@@ -115,7 +117,11 @@ class FreeChatApp:
         # [V2.2.1] Default model set to the API-compatible ID.
         self.current_model: str = self.config.get("general", {}).get("default_model", "openrouter/free")
         self.session_messages: List[Dict[str, Any]] = []
-        self.MAX_HISTORY_MESSAGES: int = 50  # Maximum number of messages to keep
+        self.MAX_HISTORY_MESSAGES: int = 100  # Hard limit on message count
+        self.MAX_HISTORY_TOKENS: int = 4000  # Token budget for history
+        self.MAX_TOKEN_CACHE_BYTES: int = 512 * 1024  # 512 KB max cache memory
+        self._stream_buffer: List[str] = []
+        self._STREAM_BUFFER_THRESHOLD: int = 128
         self.session_cost: float = 0.0
         self.session_name: Optional[str] = None
         self.available_models: Dict[str, List[str]] = {}
@@ -130,6 +136,7 @@ class FreeChatApp:
             self.tokenizer = None
             self.console.print(f"[yellow]Warning:[/] `tiktoken` not found or failed to load: {e}. Token counts will be approximate.")
         self._token_cache: OrderedDict[str, int] = OrderedDict()  # LRU cache
+        self._token_cache_bytes: int = 0
         self.commands: Dict[str, Callable] = {
             "/help": self._display_help, "/model": self._handle_model_command,
             "/prompt": self._handle_prompt_command,
@@ -475,21 +482,26 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             self.console.print(table)
         else: self._apply_prompt(args[0])
 
+    async def _bounded_get_models(self, provider):
+        """Fetch models from a provider with concurrency limit."""
+        async with self._MODEL_FETCH_SEMAPHORE:
+            return await provider.get_models()
+
     async def _fetch_models(self, force_refresh: bool = False):
         current_time = time.time()
         if not force_refresh and self.available_models and (current_time - self.models_last_fetched) < self.MODELS_CACHE_TTL:
             return
-        
+
         self.console.print("[dim]Fetching available models...[/dim]")
-        tasks = [p.get_models() for n in self.provider_factory.get_available_providers() if (p := self.provider_factory.get_provider(f"{n}/any"))]
+        tasks = [self._bounded_get_models(p) for n in self.provider_factory.get_available_providers() if (p := self.provider_factory.get_provider(f"{n}/any"))]
         if not tasks:
             return
-        
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for r in results:
             if isinstance(r, tuple): self.available_models[r[0]] = r[1]
             elif isinstance(r, Exception): self.console.print(f"[yellow]Warning: Failed to fetch models: {r}[/yellow]")
-        
+
         self.models_last_fetched = current_time
 
     def _get_bottom_toolbar(self) -> FormattedText:
@@ -505,34 +517,54 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             self._token_cache.move_to_end(text)
             return self._token_cache[text]
         count = len(self.tokenizer.encode(text))
-        self._token_cache[text] = count
-        # Limit cache size to prevent memory issues
-        if len(self._token_cache) > 1000:
-            # Remove oldest item (first item in OrderedDict)
-            self._token_cache.popitem(last=False)
+        text_size = len(text.encode('utf-8'))
+        # Skip caching for oversized texts to prevent memory spikes
+        if text_size <= self.MAX_TOKEN_CACHE_BYTES:
+            self._token_cache[text] = count
+            self._token_cache_bytes += text_size
+            # Evict by both entry count and total byte size
+            while (len(self._token_cache) > 1000 or
+                   self._token_cache_bytes > self.MAX_TOKEN_CACHE_BYTES):
+                removed_text, _ = self._token_cache.popitem(last=False)
+                self._token_cache_bytes -= len(removed_text.encode('utf-8'))
         return count
     
+    def _flush_stream_buffer(self):
+        """Flush accumulated stream buffer to stdout."""
+        if self._stream_buffer:
+            sys.stdout.write("".join(self._stream_buffer))
+            sys.stdout.flush()
+            self._stream_buffer.clear()
+
+    async def _flush_stream_buffer_async(self):
+        """Async wrapper to flush buffer via executor."""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._flush_stream_buffer)
+
     def _manage_message_history(self):
-        """Manage message history to keep it within limits."""
-        if len(self.session_messages) > self.MAX_HISTORY_MESSAGES:
-            # Extract system prompt if present
-            system_prompt = next((msg for msg in self.session_messages if msg['role'] == 'system'), None)
-            
-            # Get all non-system messages
-            non_system_messages = [msg for msg in self.session_messages if msg['role'] != 'system']
-            
-            # Calculate how many non-system messages we can keep
-            max_non_system = self.MAX_HISTORY_MESSAGES - (1 if system_prompt else 0)
-            
-            # Keep the most recent non-system messages
-            # This maintains the conversation flow while respecting the limit
-            kept_messages = non_system_messages[-max_non_system:]
-            
-            # Reconstruct the history with system prompt first
-            self.session_messages = []
-            if system_prompt:
-                self.session_messages.append(system_prompt)
-            self.session_messages.extend(kept_messages)
+        """Manage message history using token budget with message count fallback."""
+        # Extract system prompt if present (always preserved)
+        system_prompt = next((msg for msg in self.session_messages if msg['role'] == 'system'), None)
+
+        # Get all non-system messages
+        non_system_messages = [msg for msg in self.session_messages if msg['role'] != 'system']
+
+        # Hard cap on message count
+        max_non_system = self.MAX_HISTORY_MESSAGES - (1 if system_prompt else 0)
+        if len(non_system_messages) > max_non_system:
+            non_system_messages = non_system_messages[-max_non_system:]
+
+        # Token budget trimming: remove oldest messages until under budget
+        total_tokens = sum(self._count_tokens(msg.get('content', '')) for msg in non_system_messages)
+        while non_system_messages and total_tokens > self.MAX_HISTORY_TOKENS:
+            removed = non_system_messages.pop(0)
+            total_tokens -= self._count_tokens(removed.get('content', ''))
+
+        # Reconstruct the history with system prompt first
+        self.session_messages = []
+        if system_prompt:
+            self.session_messages.append(system_prompt)
+        self.session_messages.extend(non_system_messages)
     
     def _create_completer(self) -> FuzzyCompleter:
         current_time = time.time()
@@ -1613,9 +1645,14 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         try:
             self.console.print("[bold magenta]AI:[/bold magenta] ", end="")
             stream = provider.stream_chat(self.session_messages, model_name)
+            buffer_len = 0
             async for chunk in stream:
                 full_response += chunk
-                sys.stdout.write(chunk); sys.stdout.flush()
+                self._stream_buffer.append(chunk)
+                buffer_len += len(chunk)
+                if buffer_len >= self._STREAM_BUFFER_THRESHOLD:
+                    await self._flush_stream_buffer_async()
+                    buffer_len = 0
             self.console.print()
         except httpx.HTTPStatusError as e:
             try: await e.response.aread(); error_body = e.response.text
@@ -1623,6 +1660,8 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             self.console.print(f"\n[bold red]API Error {e.response.status_code}:[/bold red] {error_body}"); self.session_messages.pop(); return
         except Exception as e: self.console.print(f"\n[bold red]Error: {e}[/bold red]"); self.session_messages.pop(); return
         finally:
+            if self._stream_buffer:
+                await self._flush_stream_buffer_async()
             if temp_memory_msg and temp_memory_msg in self.session_messages:
                 self.session_messages.remove(temp_memory_msg)
         self.session_messages.append({"role": "assistant", "content": full_response})
@@ -1864,34 +1903,63 @@ class SkillSandbox:
         self.allowed_permissions = set(allowed_permissions)
         self._original_env = None
         self._restricted_env = {}
+        self._env_lock = None
 
-    def __enter__(self):
-        """Enter sandbox environment."""
+    def _build_restricted_env(self) -> Dict[str, str]:
+        """Build restricted environment dict from current os.environ."""
         import os
-        self._original_env = dict(os.environ)
-
-        self._restricted_env = {
-            k: v for k, v in self._original_env.items()
+        restricted = {
+            k: v for k, v in os.environ.items()
             if k in ('PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL')
         }
-
         if SkillSecurityManager.has_permission(self.skill_name, SkillSecurityManager.PERMISSION_ENV):
-            self._restricted_env.update({
-                k: v for k, v in self._original_env.items()
+            restricted.update({
+                k: v for k, v in os.environ.items()
                 if not k.startswith(('AWS_', 'GCP_', 'AZURE_', 'SECRET', 'TOKEN', 'KEY', 'PASSWORD'))
             })
+        return restricted
 
+    def _swap_env(self) -> None:
+        """Backup current env and replace with restricted env."""
+        import os
+        self._original_env = dict(os.environ)
+        self._restricted_env = self._build_restricted_env()
         os.environ.clear()
         os.environ.update(self._restricted_env)
-        return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Exit sandbox environment."""
+    def _restore_env(self) -> None:
+        """Restore original env from backup."""
         import os
         if self._original_env is not None:
             os.environ.clear()
             os.environ.update(self._original_env)
+
+    def __enter__(self):
+        """Enter sandbox environment (synchronous, for backward compatibility)."""
+        self._swap_env()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit sandbox environment."""
+        self._restore_env()
         return False
+
+    async def execute(self, func: Callable, *args, **kwargs):
+        """Execute a function securely within the sandbox environment.
+
+        This method is async-safe: it acquires a lock to prevent concurrent
+        env mutations and runs the function in an executor so the event loop
+        is not blocked.
+        """
+        if self._env_lock is None:
+            self._env_lock = asyncio.Lock()
+        async with self._env_lock:
+            self._swap_env()
+            try:
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(None, func, *args, **kwargs)
+            finally:
+                self._restore_env()
 
     def check_permission(self, permission: str) -> bool:
         """Check if a permission is allowed in this sandbox."""
@@ -2252,6 +2320,28 @@ class SQLiteMemoryStore:
             logging.error(f"Failed to update memory: {e}")
             return False
 
+    def batch_update_compression(self, entries: List[MemoryEntry]) -> int:
+        """Batch update compression fields for multiple memories in a single transaction."""
+        if not entries:
+            return 0
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.executemany('''
+                    UPDATE memories SET
+                        is_compressed = ?,
+                        content_compressed = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                ''', [
+                    (1, entry.content_compressed, entry.updated_at, entry.id)
+                    for entry in entries
+                ])
+                conn.commit()
+                return cursor.rowcount
+        except sqlite3.Error as e:
+            logging.error(f"Failed to batch update compression: {e}")
+            return 0
+
     def delete_memory(self, memory_id: str) -> bool:
         """Delete a memory by ID."""
         try:
@@ -2323,24 +2413,50 @@ class SQLiteMemoryStore:
             logging.error(f"Failed to get categories: {e}")
             return []
 
+    @staticmethod
+    def _escape_fts5_query(words: List[str]) -> str:
+        """Escape words for FTS5 MATCH query."""
+        escaped = []
+        for word in words:
+            word = word.replace('"', '""')
+            escaped.append(f'"{word}"')
+        return " OR ".join(escaped)
+
     def find_similar(self, content: str, threshold: float = 0.8) -> List[MemoryEntry]:
-        """Find memories with similar content using simple word overlap."""
+        """Find memories with similar content using simple word overlap.
+
+        Uses FTS5 for candidate pre-filtering before computing Jaccard similarity.
+        """
         try:
             words = set(content.lower().split())
             if not words:
                 return []
 
             with self._get_connection() as conn:
-                rows = conn.execute('''
+                # Try FTS5 pre-filtering with up to 10 words
+                fts_words = list(words)[:10]
+                fts_query = self._escape_fts5_query(fts_words)
+                candidate_rows = conn.execute('''
                     SELECT m.*, GROUP_CONCAT(mt.tag) as tags_str
                     FROM memories m
                     LEFT JOIN memory_tags mt ON m.id = mt.memory_id
-                    WHERE m.is_archived = 0
+                    JOIN memories_fts fts ON m.rowid = fts.rowid
+                    WHERE memories_fts MATCH ? AND m.is_archived = 0
                     GROUP BY m.id
-                ''').fetchall()
+                ''', (fts_query,)).fetchall()
+
+                # Fallback to full scan if FTS returns no candidates
+                if not candidate_rows:
+                    candidate_rows = conn.execute('''
+                        SELECT m.*, GROUP_CONCAT(mt.tag) as tags_str
+                        FROM memories m
+                        LEFT JOIN memory_tags mt ON m.id = mt.memory_id
+                        WHERE m.is_archived = 0
+                        GROUP BY m.id
+                    ''').fetchall()
 
                 results = []
-                for row in rows:
+                for row in candidate_rows:
                     mem_words = set(row['content'].lower().split())
                     if not mem_words:
                         continue
@@ -2816,16 +2932,19 @@ class MemoryManager:
         # Run auction
         keep, compress = self._auction.run_auction(memories, max_keep)
 
-        # Archive compressed memories
-        compressed_count = 0
+        # Archive compressed memories using batch update
+        to_compress = []
         for entry in compress:
             if not entry.compressed:
                 entry.compressed = True
                 entry.content_compressed = self._summarize_content(entry.content)
-                self._store.update_memory(entry)
-                compressed_count += 1
+                entry.updated_at = time.time()
+                to_compress.append(entry)
 
-        return compressed_count
+        if to_compress:
+            self._store.batch_update_compression(to_compress)
+
+        return len(to_compress)
 
     def _summarize_content(self, content: str, max_length: int = 200) -> str:
         """Create a summary of content for compression."""
@@ -3462,16 +3581,19 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, ToolDefinition] = {}
         self._enabled: set = set()
+        self._schema_cache: Dict[str, List[Dict[str, Any]]] = {}
 
     def register(self, tool: ToolDefinition) -> None:
         """Register a tool."""
         self._tools[tool.name] = tool
+        self._schema_cache.clear()
 
     def unregister(self, name: str) -> None:
         """Unregister a tool."""
         if name in self._tools:
             del self._tools[name]
             self._enabled.discard(name)
+            self._schema_cache.clear()
 
     def get(self, name: str) -> Optional[ToolDefinition]:
         """Get a tool by name."""
@@ -3489,26 +3611,33 @@ class ToolRegistry:
         """Enable a tool. Returns True if successful."""
         if name in self._tools:
             self._enabled.add(name)
+            self._schema_cache.clear()
             return True
         return False
 
     def disable(self, name: str) -> None:
         """Disable a tool."""
         self._enabled.discard(name)
+        self._schema_cache.clear()
 
     def is_enabled(self, name: str) -> bool:
         """Check if a tool is enabled."""
         return name in self._enabled
 
     def get_schemas_for_provider(self, provider_name: str) -> List[Dict[str, Any]]:
-        """Get tool schemas in provider-specific format."""
-        tools = self.list_enabled()
+        """Get tool schemas in provider-specific format (cached)."""
+        if provider_name in self._schema_cache:
+            return self._schema_cache[provider_name]
 
+        tools = self.list_enabled()
         if provider_name == "gemini":
-            return [tool.to_gemini_schema() for tool in tools]
+            schemas = [tool.to_gemini_schema() for tool in tools]
         else:
             # OpenAI format is default (OpenAI, OpenRouter, Anthropic, Mistral)
-            return [tool.to_openai_schema() for tool in tools]
+            schemas = [tool.to_openai_schema() for tool in tools]
+
+        self._schema_cache[provider_name] = schemas
+        return schemas
 
 
 # --- Built-in Tools ---

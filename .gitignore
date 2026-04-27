@@ -30,6 +30,12 @@ ENV/
 # FreeChat specific
 freechat_config/
 .claude/
+.claude-plugin/
+events.jsonl
+views.json
+config.json
+labels/
+statuses/
 
 # Build artifacts
 build/
