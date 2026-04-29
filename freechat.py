@@ -1984,6 +1984,11 @@ class SkillSandbox:
 
 class SkillDefinition:
 
+    def __init__(self, metadata: SkillMetadata, tools: List[ToolDefinition] = None, config_schema: Dict = None):
+        self.metadata = metadata
+        self.tools = tools or []
+        self.config_schema = config_schema or {}
+
     @property
     def name(self) -> str:
         return self.metadata.name
@@ -3081,7 +3086,6 @@ class SkillRegistryClient:
 
     def _load_config(self) -> None:
         """Load registry configuration from file."""
-        import tomllib
 
         # Initialize with default registries
         self._registries = dict(self.DEFAULT_REGISTRIES)
@@ -3341,7 +3345,7 @@ class SkillRegistry:
             }
 
         # Pattern 2: Full HTTPS URL like "https://github.com/user/repo.git" or with tree/blob
-        https_pattern = r'^https?://(github\.com|gitlab\.com|bitbucket\.org|gitee\.com)/([\w.-]+)/([\w.-]+?)(?:\.git)?(?:/tree/|/blob/)?([^?]*)?'
+        https_pattern = r'^https?://(github\.com|gitlab\.com|bitbucket\.org|gitee\.com)/([\w.-]+)/([\w.-]+?)(?:\.git)?(?:(?:/tree/|/blob/)(.*))?$'
         match = re.match(https_pattern, source, re.IGNORECASE)
         if match:
             host_map = {
