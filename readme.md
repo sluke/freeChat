@@ -1,24 +1,24 @@
 # FreeChat 💬
 
-**Your all-in-one, portable terminal AI chat tool - v2.3.0 with Memory System & Performance Optimizations**
+**Your all-in-one, portable terminal AI chat tool - v2.4.0 with TUI Interface**
 
-`FreeChat` is a powerful, easy-to-deploy single-file AI chat command line tool, designed specifically for use on cloud VPS. After connecting via SSH, it provides you with a feature-rich and responsive chat interface that integrates multiple mainstream AI providers (such as OpenRouter, OpenAI, Gemini).
+`FreeChat` is a powerful, easy-to-deploy single-file AI chat command line tool, designed specifically for use on cloud VPS. After connecting via SSH, it provides you with a full-screen TUI (Terminal User Interface) with split panes, scrollable chat history, and a collapsible sidebar.
 
 ---
 
 ## ✨ Core Features
 
+*   🖥️ **Full-Screen TUI**: A real terminal user interface with split layout — scrollable chat area, persistent header (model, prompt, cost), collapsible sidebar, and dedicated input area. No more fire-and-forget REPL.
 *   ✅ **Ultimate Simplified Deployment**: A true single-script file with no complex environment configuration required. Built-in intelligent dependency installer works out-of-the-box in a `Python 3.7+` environment.
 *   📦 **Portable Mode**: Supports saving all configuration, history, and session data in a directory alongside the script, making it easy to package, backup, and migrate as a whole.
 *   📡 **Multi-AI Provider Support**: Seamlessly integrates with OpenRouter, OpenAI, Gemini, NVIDIA, and more, allowing for easy switching and optimal selection.
 *   🧠 **Universal Model Access**: Dynamically retrieves and connects to any model from different providers, supporting instant selection and switching directly in the CLI.
 *   🎨 **Customizable AI Roles**: Easily define and switch AI system prompts through a simple configuration file, allowing it to play different roles such as programmer, translator, etc.
-*   🚀 **Pure Text Streaming Interaction**: Returns real-time streaming of plain text answers, ensuring rapid response and strong compatibility.
-*   📊 **Performance and Cost Visualization**: Displays token usage statistics, response time, per-call cost, and estimated total session cost in real-time on the status bar, giving you full control over costs.
-*   💡 **Intelligent Command Line Experience**: Features a modern CLI with command autocompletion (Tab), history navigation (↑↓), reverse history search (Ctrl+R), and auto-suggestions.
-*   ⌨️ **Modern Shortcuts**: Use `Control + Enter` to submit multi-line input, conforming to modern application habits.
+*   🚀 **Streaming Chat with Live Updates**: AI responses stream directly into the chat area with real-time display updates.
+*   📊 **Performance and Cost Visualization**: The header bar displays current model, active prompt, session cost, and session name in real-time.
+*   💡 **Intelligent Command Line Experience**: Features command autocompletion (Tab), history navigation (↑↓), and auto-suggestions in the input area.
+*   ⌨️ **TUI Keyboard Shortcuts**: `F1` for help, `F2` to toggle sidebar, `Ctrl+Enter` to send, `Ctrl+D` to exit.
 *   💾 **Session Management and Export**: Supports creating, saving, and loading chat sessions, with the ability to easily export session records in Markdown, JSON, or HTML formats.
-*   🎨 **Markdown Rendering Support**: Export sessions with beautifully rendered Markdown content in HTML format using the new `md-rendered` export option.
 *   🧠 **Memory System with Auction Compression**: Advanced long-term memory with automatic value-based compression using auction algorithms. Supports global and Git branch-specific memories with SQLite storage and full-text search.
 *   ⚡ **Performance Optimizations**: Includes connection pooling, model caching, token counting optimization, and memory management for faster response times and reduced resource usage.
 
@@ -251,9 +251,42 @@ mv ~/.config/freechat/* /path/to/your/script/freechat_config/
 
 ## 📖 Usage Guide
 
-*   **Normal Chat**: Simply type your question after the `>` prompt and press `Control + Enter` to send.
-*   **Using Commands**: All special functions are implemented through commands starting with a slash `/`. Type `/` and press the `Tab` key to view and autocomplete all available commands.
-*   **View Help**: Type `/help` at any time within the application to see the command list.
+FreeChat launches a full-screen TUI with the following layout:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Model: openai/gpt-4o  |  Prompt: default  |  Cost: $0.05   │
+├────────────────────────────────────────┬────────────────────┤
+│                                        │ Commands           │
+│  Chat Area (scrollable)                │ /help   Show help  │
+│  You: Hello                            │ /model  Model mgmt │
+│  AI: Hi! How can I help?               │ /prompt Switch...  │
+│                                        │ /memory Memory...  │
+│                                        │                    │
+│                                        │ Status             │
+│                                        │ Messages: 5        │
+├────────────────────────────────────────┴────────────────────┤
+│ > _                                                          │
+├─────────────────────────────────────────────────────────────┤
+│ F1=Help  F2=Sidebar  Ctrl+Enter=Send  Ctrl+D=Exit          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+*   **Chat**: Type your message in the input area and press `Ctrl+Enter` to send. AI responses stream directly into the chat area.
+*   **Commands**: All special functions use slash commands `/`. Type `/` and press `Tab` to autocomplete.
+*   **Sidebar**: Press `F2` to toggle the sidebar showing available commands and session status.
+*   **Help**: Press `F1` or type `/help` to see the command list.
+
+### TUI Keyboard Shortcuts
+
+| Key | Action |
+| :--- | :--- |
+| `Ctrl+Enter` | Send message |
+| `F1` | Show help |
+| `F2` | Toggle sidebar |
+| `Ctrl+D` | Exit application |
+| `Ctrl+C` | Clear input |
+| `Tab` | Autocomplete command/model |
 
 ### Memory System
 

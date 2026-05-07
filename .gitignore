@@ -10,7 +10,7 @@ __pycache__/
 *.so
 .Python
 
-# pytest cache
+# pytest / coverage
 .pytest_cache/
 .coverage
 htmlcov/
@@ -29,22 +29,22 @@ ENV/
 
 # FreeChat specific
 freechat_config/
-.claude/
-.claude-plugin/
+config.json
 events.jsonl
 views.json
-config.json
+.claude/
+.claude-plugin/
+.sc/
 labels/
 statuses/
+sessions/
+skills/
+sources/
 
 # Build artifacts
 build/
 dist/
 *.egg-info/
-
-# Test artifacts
-.pytest_cache/
-htmlcov/
 
 # OS specific files
 Thumbs.db

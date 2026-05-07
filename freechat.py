@@ -5,7 +5,7 @@
 FreeChat: A powerful, single-file AI chat CLI for your VPS.
 
 Author: AI Assistant (Generated for User Task)
-Version: 2.3.0 (Stable)
+Version: 2.4.0 (Stable)
 License: GPL-3.0
 """
 
@@ -24,6 +24,9 @@ if sys.version_info < MIN_PYTHON_VERSION:
     print(error_message, file=sys.stderr)
     sys.exit(1)
 # --- End of Python Version Check ---
+
+# --- Debug Mode Flag ---
+DEBUG_MODE = "--debug" in sys.argv
 
 # --- Bootstrap: Intelligent & Robust Dependency Installer ---
 import subprocess, importlib.util, os, time
@@ -50,6 +53,9 @@ def bootstrap():
     except (subprocess.CalledProcessError, KeyboardInterrupt, EOFError) as e: print(f"\n[ERROR] Installation failed: {e}", file=sys.stderr); sys.exit(1)
 
 bootstrap()
+# Remove --debug after bootstrap (bootstrap may restart the process via os.execv)
+if "--debug" in sys.argv:
+    sys.argv.remove("--debug")
 # --- End of Bootstrap ---
 
 # --- Main Application Imports ---
@@ -68,13 +74,98 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
 from rich.errors import MarkupError
-from prompt_toolkit import PromptSession
+from prompt_toolkit import PromptSession, Application
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.completion import WordCompleter, FuzzyCompleter
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.styles import Style
-from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.formatted_text import FormattedText, ANSI, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import HSplit, VSplit, Window, ConditionalContainer
+from prompt_toolkit.layout.controls import FormattedTextControl, BufferControl
+from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.layout.margins import ScrollbarMargin
+from prompt_toolkit.layout.processors import BeforeInput
+from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.filters import Condition
+from contextlib import contextmanager
+from io import StringIO
+
+class TUIOutputBuffer:
+    """Intercepts Rich Console output and converts to prompt_toolkit FormattedText
+    for display in the TUI chat area."""
+
+    def __init__(self, max_history: int = 10000):
+        self._history: list = []
+        self._max_history = max_history
+        self._typing: bool = False
+        self._render_console = Console(
+            file=StringIO(), force_terminal=True, width=80,
+            no_color=False, color_system="truecolor"
+        )
+
+    def _capture(self, *args, **kwargs):
+        """Render via Rich to StringIO, convert ANSI to prompt_toolkit tuples."""
+        self._render_console.file = StringIO()
+        self._render_console.print(*args, **kwargs)
+        ansi_str = self._render_console.file.getvalue()
+        if ansi_str:
+            formatted = to_formatted_text(ANSI(ansi_str))
+            self._history.extend(formatted)
+            # Evict oldest entries if over limit
+            if len(self._history) > self._max_history:
+                self._history = self._history[-self._max_history:]
+
+    def print(self, *args, **kwargs):
+        """Drop-in replacement for rich.Console.print()."""
+        self._capture(*args, **kwargs)
+
+    def status(self, message, **kwargs):
+        """Return a no-op context manager (spinner not needed in TUI)."""
+        @contextmanager
+        def _noop():
+            yield
+        return _noop()
+
+    def clear(self):
+        """Clear chat history (used by /clear command)."""
+        self._history.clear()
+
+    def get_formatted_text(self):
+        """Return the full chat history as prompt_toolkit FormattedText."""
+        if not self._history and not self._typing:
+            return [
+                ('', '\n'),
+                ('class:typing-indicator', '  Welcome to FreeChat!\n'),
+                ('class:typing-indicator', '  Type a message to chat, or /help for commands.\n'),
+                ('class:typing-indicator', '  Press Enter to send, F2 for sidebar.\n'),
+                ('', '\n'),
+            ]
+        result = list(self._history)
+        if self._typing:
+            result.append(('class:typing-indicator', '  AI is typing...'))
+        return result
+
+    def show_typing(self):
+        """Show typing indicator."""
+        self._typing = True
+
+    def hide_typing(self):
+        """Hide typing indicator."""
+        self._typing = False
+
+    def append_formatted(self, style, text):
+        """Append a single styled text segment directly (for streaming)."""
+        self._history.append((style, text))
+        if len(self._history) > self._max_history:
+            self._history = self._history[-self._max_history:]
+
+    def append_raw(self, text):
+        """Append raw unstyled text."""
+        self._history.append(('', text))
+        if len(self._history) > self._max_history:
+            self._history = self._history[-self._max_history:]
 
 class FreeChatApp:
     # Log level mapping as class constant
@@ -90,14 +181,20 @@ class FreeChatApp:
 
     def __init__(self):
         self.console = Console()
-        
+        self._tui_active: bool = False
+        self._sidebar_visible: bool = False
+        self._tui_buffer = TUIOutputBuffer()
+        self._tui_app: Optional[Application] = None
+        self.debug: bool = DEBUG_MODE
+        self._loading: bool = False
+
         script_path = Path(__file__).resolve().parent
         portable_config_dir = script_path / "freechat_config"
         xdg_config_dir = Path.home() / ".config" / "freechat"
         
         if portable_config_dir.is_dir():
             self.config_dir = portable_config_dir
-            self.console.print(f"[bold yellow]! Portable config directory detected. Using '{self.config_dir}'[/bold yellow]")
+            self.output.print(f"[bold yellow]! Portable config directory detected. Using '{self.config_dir}'[/bold yellow]")
         else:
             self.config_dir = xdg_config_dir
 
@@ -109,7 +206,10 @@ class FreeChatApp:
         self._setup_config()
         self.config = self._load_config(self.config_path)
         self.prompts = self._load_config(self.prompts_path)
-        
+        # Config-based debug activation (CLI flag takes precedence)
+        if not self.debug:
+            self.debug = self.config.get("general", {}).get("debug", False)
+
         self.default_prompt_name = self.config.get("general", {}).get("default_prompt", "default")
         self.active_prompt_name: str = ""
         self.active_prompt_content: str = ""
@@ -134,7 +234,7 @@ class FreeChatApp:
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
         except Exception as e:
             self.tokenizer = None
-            self.console.print(f"[yellow]Warning:[/] `tiktoken` not found or failed to load: {e}. Token counts will be approximate.")
+            self.output.print(f"[yellow]Warning:[/] `tiktoken` not found or failed to load: {e}. Token counts will be approximate.")
         self._token_cache: OrderedDict[str, int] = OrderedDict()  # LRU cache
         self._token_cache_bytes: int = 0
         self.commands: Dict[str, Callable] = {
@@ -144,8 +244,9 @@ class FreeChatApp:
             "/file": self._handle_file_command,
             "/language": self._handle_language_command,
             "/skill": self._handle_skill_command,
+            "/debug": self._toggle_debug,
             "/memory": self._handle_memory_command,
-            "/clear": lambda args: self.console.clear(), "/exit": self._exit_app,
+            "/clear": lambda args: self.output.clear(), "/exit": self._exit_app,
         }
         # Get log file path from config or use default
         log_file_name = self.config.get("general", {}).get("log_file", "freechat.log")
@@ -223,17 +324,26 @@ class FreeChatApp:
 
         self._apply_prompt(self.default_prompt_name, is_startup=True)
 
+    @property
+    def output(self):
+        """Return the active output sink (TUI buffer or raw Console)."""
+        if self._tui_active and self._tui_buffer is not None:
+            return self._tui_buffer
+        return self.console
+
     def _setup_logging(self):
         """Set up logging for security audit and error tracking."""
         try:
             # Get log level from config or use default INFO
             log_level_str = self.config.get('general', {}).get('log_level', 'INFO').upper()
             log_level = self.LOG_LEVEL_MAP.get(log_level_str, logging.INFO)
-            
+            if self.debug:
+                log_level = logging.DEBUG
+
             # Create a logger with file rotation
             logger = logging.getLogger('FreeChat')
             logger.setLevel(log_level)
-            
+
             # Only add handler if none exist
             if not logger.handlers:
                 # Add rotating file handler
@@ -249,11 +359,18 @@ class FreeChatApp:
                 )
                 handler.setFormatter(formatter)
                 logger.addHandler(handler)
-                
+
+                # In debug mode, also log to stderr
+                if self.debug:
+                    console_handler = logging.StreamHandler(sys.stderr)
+                    console_handler.setLevel(logging.DEBUG)
+                    console_handler.setFormatter(formatter)
+                    logger.addHandler(console_handler)
+
                 # Log application startup
-                logger.info("FreeChat started")
+                logger.info("FreeChat started (debug=%s)", self.debug)
         except Exception as e:
-            self.console.print(f"[yellow]Warning: Logging setup failed: {e}[/yellow]")
+            self.output.print(f"[yellow]Warning: Logging setup failed: {e}[/yellow]")
 
     def _log(self, level: str, message: str):
         """Log a message with the specified level."""
@@ -263,7 +380,7 @@ class FreeChatApp:
             logger.log(log_level, message)
         except Exception as e:
             # If logging fails, print a warning to the console
-            self.console.print(f"[yellow]Warning: Logging failed: {e}[/yellow]")
+            self.output.print(f"[yellow]Warning: Logging failed: {e}[/yellow]")
 
     def _load_translations(self):
         """Load translations for different languages."""
@@ -273,15 +390,15 @@ class FreeChatApp:
                 with open(translations_path, 'r', encoding='utf-8') as f:
                     return json.load(f)
         except Exception as e:
-            self.console.print(f"[yellow]Warning: Failed to load translations: {e}[/yellow]")
+            self.output.print(f"[yellow]Warning: Failed to load translations: {e}[/yellow]")
             self._log("error", f"Failed to load translations: {e}")
         
         # Fallback to default translations if file not found or invalid
         return {
             "en": {
                 "welcome": "FreeChat v{version} (Stable)",
-                "help_text": "Type /help for commands, /exit to quit. Press Control or Command + Enter to send.",
-                "prompt": "Prompt: {prompt} | Model: {model} | Cost: ${cost:.4f} | (Ctrl+Enter)",
+                "help_text": "Type /help for commands, /exit to quit. Press Enter to send.",
+                "prompt": "Prompt: {prompt} | Model: {model} | Cost: ${cost:.4f} | (Enter)",
                 "startup": "Fetching available models...",
                 "model_switched": "✓ Switched model to: {model}",
                 "model_error": "Error: Provider for '{model}' not found.",
@@ -312,7 +429,7 @@ class FreeChatApp:
                 "command_export": "Export session: md, json, html, md-rendered.",
                 "command_clear": "Clear the terminal screen.",
                 "command_exit": "Exit the application.",
-                "usage": "Type a message and press Control or Command + Enter to send.",
+                "usage": "Type a message and press Enter to send.",
                 "goodbye": "Goodbye!",
                 "error": "Error: {error}",
                 "api_error": "API Error {code}: {message}",
@@ -321,8 +438,8 @@ class FreeChatApp:
             },
             "zh": {
                 "welcome": "FreeChat v{version} (稳定版)",
-                "help_text": "输入 /help 查看命令，/exit 退出。按 Control 或 Command + Enter 发送消息。",
-                "prompt": "提示: {prompt} | 模型: {model} | 费用: ${cost:.4f} | (Ctrl+Enter)",
+                "help_text": "输入 /help 查看命令，/exit 退出。按 Enter 发送消息。",
+                "prompt": "提示: {prompt} | 模型: {model} | 费用: ${cost:.4f} | (Enter)",
                 "startup": "正在获取可用模型...",
                 "model_switched": "✓ 模型已切换为: {model}",
                 "model_error": "错误: 未找到 '{model}' 的提供商。",
@@ -353,7 +470,7 @@ class FreeChatApp:
                 "command_export": "导出会话: md, json, html, md-rendered。",
                 "command_clear": "清空当前终端屏幕。",
                 "command_exit": "退出应用程序。",
-                "usage": "输入消息并按 Control 或 Command + Enter 发送。",
+                "usage": "输入消息并按 Enter 发送。",
                 "goodbye": "再见！",
                 "error": "错误: {error}",
                 "api_error": "API 错误 {code}: {message}",
@@ -395,7 +512,7 @@ mistral_api_key = ""
 nvidia_api_key = ""
 """
             with open(self.config_path, "w", encoding="utf-8") as f: f.write(default_config.strip() + "\n")
-            self.console.print(f"[bold green]✓ Main config created at: {self.config_path}[/bold green]")
+            self.output.print(f"[bold green]✓ Main config created at: {self.config_path}[/bold green]")
             self._log("info", f"Created main config at: {self.config_path}")
 
         if not self.prompts_path.is_file():
@@ -409,11 +526,11 @@ prompt = """You are an expert programmer. Provide only code solutions."""
 prompt = """You are a multilingual translator. Your task is to translate the user's text into English."""
 '''
             with open(self.prompts_path, "w", encoding="utf-8") as f: f.write(default_prompts.strip() + "\n")
-            self.console.print(f"[bold green]✓ Prompts file created at: {self.prompts_path}[/bold green]")
+            self.output.print(f"[bold green]✓ Prompts file created at: {self.prompts_path}[/bold green]")
             self._log("info", f"Created prompts file at: {self.prompts_path}")
         
         if first_run:
-            self.console.print("[bold yellow]! Please add API keys to config.toml and restart.[/bold yellow]")
+            self.output.print("[bold yellow]! Please add API keys to config.toml and restart.[/bold yellow]")
             self._log("info", "First run: API keys need to be configured")
             sys.exit(0)
 
@@ -422,7 +539,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         if path.exists():
             try:
                 with open(path, "rb") as f: config = tomllib.load(f)
-            except tomllib.TOMLDecodeError as e: self.console.print(f"[bold red]Error: Invalid config file '{path}': {e}[/bold red]"); sys.exit(1)
+            except tomllib.TOMLDecodeError as e: self.output.print(f"[bold red]Error: Invalid config file '{path}': {e}[/bold red]"); sys.exit(1)
         
         # Load API keys from environment variables if not in config
         providers = config.get("providers", {})
@@ -446,7 +563,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 if "providers" not in config:
                     config["providers"] = {}
                 config["providers"][key] = env_value
-                self.console.print(f"[bold green]✓ Loaded {key} from environment variable.[/bold green]")
+                self.output.print(f"[bold green]✓ Loaded {key} from environment variable.[/bold green]")
         
         return config
 
@@ -457,7 +574,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 tomli_w.dump(self.config, f)
             self._log("info", "Configuration saved")
         except Exception as e:
-            self.console.print(f"[yellow]Warning: Failed to save configuration: {e}[/yellow]")
+            self.output.print(f"[yellow]Warning: Failed to save configuration: {e}[/yellow]")
             self._log("error", f"Failed to save configuration: {e}")
 
     def _apply_prompt(self, prompt_name: str, is_startup: bool = False):
@@ -467,19 +584,19 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             self.active_prompt_content = prompt_data["prompt"]
             self.session_messages = [{"role": "system", "content": self.active_prompt_content}]
             self.session_cost, self.session_name = 0.0, None
-            if not is_startup: self.console.print(f"[bold green]✓ Prompt '{prompt_name}' applied. New session started.[/bold green]")
+            if not is_startup: self.output.print(f"[bold green]✓ Prompt '{prompt_name}' applied. New session started.[/bold green]")
         else:
-            self.console.print(f"[bold red]Error: Prompt '{prompt_name}' not found in prompts.toml.[/bold red]")
+            self.output.print(f"[bold red]Error: Prompt '{prompt_name}' not found in prompts.toml.[/bold red]")
             if is_startup: self.active_prompt_name, self.active_prompt_content, self.session_messages = "none", "", []
 
     async def _handle_prompt_command(self, args: List[str]):
         if not args or args[0] == "view":
-            self.console.print(f"[bold]Active prompt:[/] [cyan]{self.active_prompt_name}[/cyan]")
-            self.console.print(Panel(self.active_prompt_content or "No system prompt active."))
+            self.output.print(f"[bold]Active prompt:[/] [cyan]{self.active_prompt_name}[/cyan]")
+            self.output.print(Panel(self.active_prompt_content or "No system prompt active."))
         elif args[0] == "list":
             table = Table("Name", "Content Preview")
             for name, data in self.prompts.items(): table.add_row(name, data.get("prompt", "N/A").split('\n')[0])
-            self.console.print(table)
+            self.output.print(table)
         else: self._apply_prompt(args[0])
 
     async def _bounded_get_models(self, provider):
@@ -492,20 +609,29 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         if not force_refresh and self.available_models and (current_time - self.models_last_fetched) < self.MODELS_CACHE_TTL:
             return
 
-        self.console.print("[dim]Fetching available models...[/dim]")
+        self._loading = True
+        if self._tui_app:
+            self._tui_app.invalidate()
+        logging.getLogger('FreeChat').info("Fetching available models...")
         tasks = [self._bounded_get_models(p) for n in self.provider_factory.get_available_providers() if (p := self.provider_factory.get_provider(f"{n}/any"))]
         if not tasks:
+            self._loading = False
+            if self._tui_app:
+                self._tui_app.invalidate()
             return
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for r in results:
             if isinstance(r, tuple): self.available_models[r[0]] = r[1]
-            elif isinstance(r, Exception): self.console.print(f"[yellow]Warning: Failed to fetch models: {r}[/yellow]")
+            elif isinstance(r, Exception): logging.getLogger('FreeChat').warning(f"Failed to fetch models: {r}")
 
         self.models_last_fetched = current_time
+        self._loading = False
+        if self._tui_app:
+            self._tui_app.invalidate()
 
     def _get_bottom_toolbar(self) -> FormattedText:
-        text = f"Prompt: {self.active_prompt_name} | Model: {self.current_model} | Cost: ${self.session_cost:.4f} | (Ctrl+Enter)"
+        text = f"Prompt: {self.active_prompt_name} | Model: {self.current_model} | Cost: ${self.session_cost:.4f} | (Enter)"
         return FormattedText([("class:bottom-toolbar", text)])
 
     def _count_tokens(self, text: str) -> int:
@@ -530,16 +656,21 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         return count
     
     def _flush_stream_buffer(self):
-        """Flush accumulated stream buffer to stdout."""
+        """Flush accumulated stream buffer to TUI chat display."""
         if self._stream_buffer:
-            sys.stdout.write("".join(self._stream_buffer))
-            sys.stdout.flush()
+            chunk = "".join(self._stream_buffer)
+            if self._tui_active:
+                self._tui_buffer.append_raw(chunk)
+                if self._tui_app:
+                    self._tui_app.invalidate()
+            else:
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
             self._stream_buffer.clear()
 
     async def _flush_stream_buffer_async(self):
-        """Async wrapper to flush buffer via executor."""
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._flush_stream_buffer)
+        """Async wrapper to flush buffer."""
+        self._flush_stream_buffer()
 
     def _manage_message_history(self):
         """Manage message history using token budget with message count fallback."""
@@ -581,9 +712,9 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         return self._completer
 
     def _display_welcome(self):
-        banner = Text("FreeChat v2.3.0 (Stable)", style="bold magenta", justify="center")
-        info = Text("Type /help for commands, /exit to quit. Press Control or Command + Enter to send.", style="dim", justify="center")
-        self.console.print(Panel.fit(Text.assemble(banner, "\n", info), padding=(1, 4)))
+        banner = Text("FreeChat v2.4.0 (Stable)", style="bold magenta", justify="center")
+        info = Text("Type /help for commands, /exit to quit. Press Enter to send.", style="dim", justify="center")
+        self.output.print(Panel.fit(Text.assemble(banner, "\n", info), padding=(1, 4)))
         
     async def _display_help(self, args: List[str]):
         help_text = """[bold]Welcome to FreeChat! ✨[/bold]
@@ -610,21 +741,269 @@ prompt = """You are a multilingual translator. Your task is to translate the use
   [cyan]/skill <action>[/cyan]        Manage skills: [dim]list, install <path>, uninstall <name>, info <name>[/dim].
   [cyan]/memory <action>[/cyan]       Manage memories: [dim]remember, recall, list, forget, compress, stats[/dim].
   [cyan]/clear[/cyan]                 Clear the terminal screen.
+  [cyan]/debug[/cyan]                Toggle debug mode (show tracebacks, verbose logging).
   [cyan]/exit[/cyan]                  Exit the application.
 [bold]Usage:[/bold]
-- Type a message and press [bold]Control or Command + Enter[/bold] to send.
+- Type a message and press [bold]Enter[/bold] to send.
 - When tools are enabled, the AI can use them to help answer your questions.
 """
-        try: self.console.print(Panel(Text.from_markup(help_text), title="Help", border_style="blue"))
-        except MarkupError: self.console.print("[bold red]Internal Warning:[/bold red] Help text markup is invalid.")
+        try: self.output.print(Panel(Text.from_markup(help_text), title="Help", border_style="blue"))
+        except MarkupError: self.output.print("[bold red]Internal Warning:[/bold red] Help text markup is invalid.")
     
-    def _exit_app(self, args: List[str]): raise EOFError
+    def _exit_app(self, args: List[str]):
+        if self._tui_app:
+            self._tui_app.exit()
+        else:
+            raise EOFError
+
+    def _toggle_debug(self, args: List[str]):
+        """Toggle debug mode on/off at runtime."""
+        self.debug = not self.debug
+        # Update logger level
+        logger = logging.getLogger('FreeChat')
+        if self.debug:
+            logger.setLevel(logging.DEBUG)
+            # Add console handler if not present
+            if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, type(None))
+                       for h in logger.handlers if hasattr(h, 'stream') and h.stream == sys.stderr):
+                formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+                console_handler = logging.StreamHandler(sys.stderr)
+                console_handler.setLevel(logging.DEBUG)
+                console_handler.setFormatter(formatter)
+                logger.addHandler(console_handler)
+        else:
+            logger.setLevel(self.LOG_LEVEL_MAP.get(
+                self.config.get('general', {}).get('log_level', 'INFO').upper(), logging.INFO))
+        status = "[bold green]ON[/bold green]" if self.debug else "[dim]OFF[/dim]"
+        self.output.print(f"[bold cyan]Debug mode:[/bold cyan] {status}")
+
+    def _build_tui_layout(self) -> Application:
+        """Build the prompt_toolkit Application with split layout."""
+        sidebar_filter = Condition(lambda: self._sidebar_visible)
+
+        # --- Header ---
+        def get_header_text():
+            parts = [
+                ('class:header', f' Model: {self.current_model}'),
+                ('class:header', f'  |  Prompt: {self.active_prompt_name}'),
+                ('class:header', f'  |  Cost: ${self.session_cost:.4f}'),
+            ]
+            if self._loading:
+                parts.append(('class:header-loading', '  |  Loading...'))
+            if self.debug:
+                parts.append(('class:header-debug', '  |  DEBUG'))
+            return FormattedText(parts)
+
+        header = Window(
+            FormattedTextControl(get_header_text),
+            height=1,
+            style='class:header'
+        )
+
+        # --- Chat Area ---
+        def get_chat_content():
+            return self._tui_buffer.get_formatted_text()
+
+        chat_window = Window(
+            FormattedTextControl(get_chat_content),
+            wrap_lines=True,
+            right_margins=[ScrollbarMargin()],
+            style='class:chat-area'
+        )
+        self._chat_window = chat_window
+
+        # --- Sidebar ---
+        def get_sidebar_content():
+            lines = [
+                ('class:sidebar-title', ' Commands\n'),
+                ('class:sidebar', ' /help      Show help\n'),
+                ('class:sidebar', ' /model     Model mgmt\n'),
+                ('class:sidebar', ' /prompt    Switch prompt\n'),
+                ('class:sidebar', ' /session   Sessions\n'),
+                ('class:sidebar', ' /memory    Memory system\n'),
+                ('class:sidebar', ' /skill     Skills\n'),
+                ('class:sidebar', ' /file      Upload file\n'),
+                ('class:sidebar', ' /export    Export chat\n'),
+                ('class:sidebar', ' /clear     Clear screen\n'),
+                ('class:sidebar', ' /debug     Toggle debug\n'),
+                ('class:sidebar', ' /exit      Quit\n'),
+                ('', '\n'),
+                ('class:sidebar-title', ' Shortcuts\n'),
+                ('class:sidebar', ' Enter      Send\n'),
+                ('class:sidebar', ' F2/Ctrl+B  Sidebar\n'),
+                ('class:sidebar', ' F1         Help\n'),
+                ('class:sidebar', ' Ctrl+D     Exit\n'),
+                ('', '\n'),
+                ('class:sidebar-title', ' Status\n'),
+                ('class:sidebar', f' Messages: {len(self.session_messages) - 1}\n'),
+                ('class:sidebar', f' Model: {self.current_model.split("/")[-1]}\n'),
+            ]
+            if self.recent_models:
+                lines.append(('', '\n'))
+                lines.append(('class:sidebar-title', ' Recent\n'))
+                for m in self.recent_models[:5]:
+                    lines.append(('class:sidebar', f' {m}\n'))
+            return lines
+
+        sidebar = ConditionalContainer(
+            Window(
+                FormattedTextControl(get_sidebar_content),
+                width=30,
+                style='class:sidebar-bg'
+            ),
+            filter=sidebar_filter
+        )
+
+        # --- Main body: chat + optional sidebar ---
+        body = VSplit([
+            chat_window,
+            sidebar,
+        ])
+
+        # --- Input Area ---
+        def on_input_accept(buf):
+            text = buf.text.strip()
+            buf.text = ''
+            if text:
+                self._tui_app.create_background_task(self._tui_dispatch(text))
+
+        input_buffer = Buffer(
+            accept_handler=on_input_accept,
+            history=FileHistory(str(self.history_path)),
+            auto_suggest=AutoSuggestFromHistory(),
+            completer=self._create_completer(),
+            complete_while_typing=True,
+        )
+
+        input_kb = KeyBindings()
+
+        @input_kb.add('enter')
+        @input_kb.add('c-j')
+        def _(event):
+            event.current_buffer.validate_and_handle()
+
+        input_control = BufferControl(
+            buffer=input_buffer,
+            key_bindings=input_kb,
+            input_processors=[BeforeInput([('class:input-prompt', '> ')])],
+        )
+
+        input_area = Window(
+            input_control,
+            height=1,
+            style='class:input-area',
+            wrap_lines=True,
+        )
+
+        # --- Footer ---
+        def get_footer_text():
+            debug_tag = ' [DEBUG]' if self.debug else ''
+            return FormattedText([
+                ('class:footer', f'{debug_tag} F1=Help  F2=Sidebar  Enter=Send  Ctrl+C=Clear  Ctrl+D=Exit')
+            ])
+
+        footer = Window(
+            FormattedTextControl(get_footer_text),
+            height=1,
+            style='class:footer'
+        )
+
+        # --- Root layout ---
+        root_container = HSplit([
+            header,
+            body,
+            input_area,
+            footer,
+        ])
+
+        layout = Layout(root_container, focused_element=input_area)
+
+        # --- Style ---
+        style = Style.from_dict({
+            'header': 'bold #e6edf3 bg:#0d1117',
+            'header-loading': 'bold #ffd700 bg:#0d1117',
+            'header-debug': 'bold #ff4444 bg:#0d1117',
+            'chat-area': '#c9d1d9 bg:#0d1117',
+            'user-label': 'bold #58a6ff',
+            'ai-label': 'bold #a371f7',
+            'meta-text': 'italic #6e7681',
+            'separator': '#21262d',
+            'error-text': 'bold #f85149',
+            'typing-indicator': 'italic #6e7681',
+            'sidebar-bg': 'bg:#161b22',
+            'sidebar-title': 'bold #58a6ff',
+            'sidebar': '#8b949e',
+            'input-prompt': 'bold #3fb950',
+            'input-area': '#c9d1d9 bg:#0d1117',
+            'input-area-focused': 'bg:#0d1117 #ffffff',
+            'footer': '#8b949e bg:#0d1117',
+            'bottom-toolbar': '#ffffff bg:#333333',
+        })
+
+        # --- Key Bindings ---
+        kb = KeyBindings()
+
+        @kb.add('f1')
+        def _(event):
+            event.app.create_background_task(self._display_help([]))
+
+        @kb.add('f2')
+        @kb.add('c-b')
+        def _(event):
+            self._sidebar_visible = not self._sidebar_visible
+
+        @kb.add('c-d')
+        def _(event):
+            event.app.exit()
+
+        @kb.add('c-c')
+        def _(event):
+            event.current_buffer.reset()
+
+        # --- Application ---
+        app = Application(
+            layout=layout,
+            key_bindings=kb,
+            style=style,
+            full_screen=True,
+            mouse_support=True,
+        )
+        self._tui_app = app
+        return app
+
+    def _scroll_chat_to_bottom(self):
+        """Scroll chat window to bottom if available."""
+        if hasattr(self, '_chat_window') and self._chat_window:
+            try:
+                # Force scroll to bottom by setting a large scroll offset
+                info = self._chat_window.render_info
+                if info and info.content_height > info.window_height:
+                    self._chat_window.vertical_scroll = max(0, info.content_height - info.window_height)
+            except Exception:
+                pass
+
+    async def _tui_dispatch(self, text: str):
+        """Dispatch user input from the TUI input area."""
+        try:
+            await (self._handle_command if text.startswith('/') else self._handle_prompt)(text)
+        except (EOFError, KeyboardInterrupt):
+            await self.close_providers()
+            self._tui_app.exit()
+        except Exception as e:
+            self._tui_buffer.print(f"[bold red]Error: {e}[/bold red]")
+            if self.debug:
+                import traceback
+                self._tui_buffer.print(f"[dim]{traceback.format_exc()}[/dim]")
+        finally:
+            if self._tui_app:
+                self._tui_app.invalidate()
+            self._scroll_chat_to_bottom()
 
     async def _handle_command(self, user_input: str):
         parts = user_input.strip().split(maxsplit=1)
         cmd, args = parts[0], parts[1].split() if len(parts) > 1 else []
         if func := self.commands.get(cmd): await func(args) if asyncio.iscoroutinefunction(func) else func(args)
-        else: self.console.print(f"[yellow]Unknown command: {cmd}. Type /help.[/yellow]")
+        else: self.output.print(f"[yellow]Unknown command: {cmd}. Type /help.[/yellow]")
 
     async def _handle_model_command(self, args: List[str]):
         """Handle /model command with enhanced capabilities."""
@@ -642,14 +1021,14 @@ prompt = """You are a multilingual translator. Your task is to translate the use
 
         if cmd == 'search':
             if len(args) < 2:
-                self.console.print("[yellow]Usage: /model search <keyword>[/yellow]")
+                self.output.print("[yellow]Usage: /model search <keyword>[/yellow]")
                 return
             await self._search_models(args[1])
             return
 
         if cmd == 'info':
             if len(args) < 2:
-                self.console.print("[yellow]Usage: /model info <model_name>[/yellow]")
+                self.output.print("[yellow]Usage: /model info <model_name>[/yellow]")
                 return
             await self._show_model_info(args[1])
             return
@@ -673,31 +1052,31 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         provider_name = self.current_model.split('/')[0] if '/' in self.current_model else 'unknown'
         model_name = self.current_model.split('/', 1)[1] if '/' in self.current_model else self.current_model
 
-        self.console.print(f"\n[bold cyan]Current Model[/bold cyan]")
-        self.console.print(f"  [bold]{self.current_model}[/bold]")
+        self.output.print(f"\n[bold cyan]Current Model[/bold cyan]")
+        self.output.print(f"  [bold]{self.current_model}[/bold]")
 
         # Show provider info
         provider = self.provider_factory.get_provider(self.current_model)
         if provider:
-            self.console.print(f"  Provider: {provider_name}")
-            self.console.print(f"  Status: [green]Available[/green]")
+            self.output.print(f"  Provider: {provider_name}")
+            self.output.print(f"  Status: [green]Available[/green]")
         else:
-            self.console.print(f"  Provider: {provider_name}")
-            self.console.print(f"  Status: [red]Not available (no API key)[/red]")
+            self.output.print(f"  Provider: {provider_name}")
+            self.output.print(f"  Status: [red]Not available (no API key)[/red]")
 
         # Show if it's a favorite
         if self.current_model in self.favorite_models:
-            self.console.print(f"  [yellow]★ Favorite[/yellow]")
+            self.output.print(f"  [yellow]★ Favorite[/yellow]")
 
-        self.console.print(f"\n[yellow]Usage:[/yellow]")
-        self.console.print(f"  /model <name>          - Switch to a model")
-        self.console.print(f"  /model list            - List available models")
-        self.console.print(f"  /model list <provider> - List models from a provider")
-        self.console.print(f"  /model search <kw>     - Search models by keyword")
-        self.console.print(f"  /model info <name>     - Show model details")
-        self.console.print(f"  /model recent          - Show recently used models")
-        self.console.print(f"  /model fav             - Show favorite models")
-        self.console.print(f"  /model fav <name>      - Toggle favorite status\n")
+        self.output.print(f"\n[yellow]Usage:[/yellow]")
+        self.output.print(f"  /model <name>          - Switch to a model")
+        self.output.print(f"  /model list            - List available models")
+        self.output.print(f"  /model list <provider> - List models from a provider")
+        self.output.print(f"  /model search <kw>     - Search models by keyword")
+        self.output.print(f"  /model info <name>     - Show model details")
+        self.output.print(f"  /model recent          - Show recently used models")
+        self.output.print(f"  /model fav             - Show favorite models")
+        self.output.print(f"  /model fav <name>      - Toggle favorite status\n")
 
     async def _list_models(self, provider_filter: Optional[str] = None):
         """List available models, optionally filtered by provider."""
@@ -709,8 +1088,8 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         providers_to_list = {provider_filter: self.provider_factory.providers.get(provider_filter)} if provider_filter else self.provider_factory.providers
 
         if provider_filter and provider_filter not in self.provider_factory.providers:
-            self.console.print(f"[bold red]Error: Provider '{provider_filter}' not found.[/bold red]")
-            self.console.print(f"[yellow]Available providers: {', '.join(self.provider_factory.get_available_providers())}[/yellow]")
+            self.output.print(f"[bold red]Error: Provider '{provider_filter}' not found.[/bold red]")
+            self.output.print(f"[yellow]Available providers: {', '.join(self.provider_factory.get_available_providers())}[/yellow]")
             return
 
         total_models = 0
@@ -736,8 +1115,8 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             except Exception as e:
                 table.add_row(provider_name, f"[red]Error: {e}[/red]", "")
 
-        self.console.print(table)
-        self.console.print(f"[dim]Total: {total_models} models from {len(self.provider_factory.providers)} provider(s)[/dim]")
+        self.output.print(table)
+        self.output.print(f"[dim]Total: {total_models} models from {len(self.provider_factory.providers)} provider(s)[/dim]")
 
     async def _search_models(self, keyword: str):
         """Search models by keyword."""
@@ -755,7 +1134,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 continue
 
         if not results:
-            self.console.print(f"[yellow]No models found matching '{keyword}'.[/yellow]")
+            self.output.print(f"[yellow]No models found matching '{keyword}'.[/yellow]")
             return
 
         table = Table(title=f"Search Results for '{keyword}'")
@@ -774,21 +1153,21 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         if len(results) > 30:
             table.add_row("", f"[dim]... and {len(results) - 30} more[/dim]", "")
 
-        self.console.print(table)
-        self.console.print(f"[dim]Found {len(results)} result(s)[/dim]")
+        self.output.print(table)
+        self.output.print(f"[dim]Found {len(results)} result(s)[/dim]")
 
     async def _show_model_info(self, model_name: str):
         """Show detailed information about a model."""
         # Ensure model has provider prefix
         if '/' not in model_name:
-            self.console.print(f"[yellow]Model name should include provider prefix, e.g., openrouter/gpt-4[/yellow]")
+            self.output.print(f"[yellow]Model name should include provider prefix, e.g., openrouter/gpt-4[/yellow]")
             return
 
         provider_name = model_name.split('/')[0]
         provider = self.provider_factory.get_provider(model_name)
 
         if not provider:
-            self.console.print(f"[bold red]Error: Provider '{provider_name}' not available.[/bold red]")
+            self.output.print(f"[bold red]Error: Provider '{provider_name}' not available.[/bold red]")
             return
 
         try:
@@ -796,34 +1175,34 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             model_part = model_name.split('/', 1)[1]
 
             if model_part not in models:
-                self.console.print(f"[yellow]Model '{model_name}' not found in provider's model list.[/yellow]")
+                self.output.print(f"[yellow]Model '{model_name}' not found in provider's model list.[/yellow]")
                 return
 
-            self.console.print(f"\n[bold cyan]Model: {model_name}[/bold cyan]")
-            self.console.print(f"  Provider: {provider_name}")
-            self.console.print(f"  Available: [green]Yes[/green]")
+            self.output.print(f"\n[bold cyan]Model: {model_name}[/bold cyan]")
+            self.output.print(f"  Provider: {provider_name}")
+            self.output.print(f"  Available: [green]Yes[/green]")
 
             if model_name == self.current_model:
-                self.console.print(f"  Status: [bold yellow]Currently selected[/bold yellow]")
+                self.output.print(f"  Status: [bold yellow]Currently selected[/bold yellow]")
 
             if model_name in self.favorite_models:
-                self.console.print(f"  Favorite: [yellow]★ Yes[/yellow]")
+                self.output.print(f"  Favorite: [yellow]★ Yes[/yellow]")
             else:
-                self.console.print(f"  Favorite: No")
+                self.output.print(f"  Favorite: No")
 
             # Show pricing if available (OpenRouter)
             if hasattr(provider, 'prices') and provider.prices and model_part in provider.prices:
                 pricing = provider.prices[model_part]
-                self.console.print(f"  Input price: ${pricing.get('input', 0):.6f}/token")
-                self.console.print(f"  Output price: ${pricing.get('output', 0):.6f}/token")
+                self.output.print(f"  Input price: ${pricing.get('input', 0):.6f}/token")
+                self.output.print(f"  Output price: ${pricing.get('output', 0):.6f}/token")
 
         except Exception as e:
-            self.console.print(f"[red]Error getting model info: {e}[/red]")
+            self.output.print(f"[red]Error getting model info: {e}[/red]")
 
     def _show_recent_models(self):
         """Display recently used models."""
         if not self.recent_models:
-            self.console.print("[yellow]No recent models. Start chatting to build history![/yellow]")
+            self.output.print("[yellow]No recent models. Start chatting to build history![/yellow]")
             return
 
         table = Table(title="Recent Models")
@@ -839,12 +1218,12 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 status = "[yellow]★[/yellow]"
             table.add_row(str(i), model, status)
 
-        self.console.print(table)
+        self.output.print(table)
 
     def _show_favorite_models(self):
         """Display favorite models."""
         if not self.favorite_models:
-            self.console.print("[yellow]No favorite models. Use /model fav <name> to add one.[/yellow]")
+            self.output.print("[yellow]No favorite models. Use /model fav <name> to add one.[/yellow]")
             return
 
         table = Table(title="Favorite Models")
@@ -856,22 +1235,22 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             status = "[bold yellow]← current[/bold yellow]" if model == self.current_model else ""
             table.add_row(str(i), model, status)
 
-        self.console.print(table)
+        self.output.print(table)
 
     async def _toggle_favorite(self, model_name: str):
         """Toggle favorite status for a model."""
         if model_name in self.favorite_models:
             self.favorite_models.remove(model_name)
-            self.console.print(f"[bold yellow]★ Removed '{model_name}' from favorites.[/bold yellow]")
+            self.output.print(f"[bold yellow]★ Removed '{model_name}' from favorites.[/bold yellow]")
         else:
             # Validate model exists
             provider_name = model_name.split('/')[0] if '/' in model_name else ''
             if provider_name not in self.provider_factory.get_available_providers():
-                self.console.print(f"[bold red]Error: Provider for '{model_name}' not found.[/bold red]")
+                self.output.print(f"[bold red]Error: Provider for '{model_name}' not found.[/bold red]")
                 return
 
             self.favorite_models.append(model_name)
-            self.console.print(f"[bold yellow]★ Added '{model_name}' to favorites.[/bold yellow]")
+            self.output.print(f"[bold yellow]★ Added '{model_name}' to favorites.[/bold yellow]")
 
         # Save to config
         if "general" not in self.config:
@@ -900,24 +1279,24 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             old_model = self.current_model
             self.current_model = new_model
             self._update_recent_models(new_model)
-            self.console.print(f"[bold green]✓ Switched model to: {self.current_model}[/bold green]")
+            self.output.print(f"[bold green]✓ Switched model to: {self.current_model}[/bold green]")
             self._log("info", f"Switched model from {old_model} to {new_model}")
         else:
-            self.console.print(f"[bold red]Error: Provider for '{new_model}' not found.[/bold red]")
-            self.console.print(f"[yellow]Available providers: {', '.join(self.provider_factory.get_available_providers())}[/yellow]")
+            self.output.print(f"[bold red]Error: Provider for '{new_model}' not found.[/bold red]")
+            self.output.print(f"[yellow]Available providers: {', '.join(self.provider_factory.get_available_providers())}[/yellow]")
             self._log("error", f"Failed to switch model: Provider for '{new_model}' not found")
 
     async def _handle_session_command(self, args: List[str]):
         if not args:
-            self.console.print("[yellow]Usage: /session new|save|load|list[/yellow]"); return
+            self.output.print("[yellow]Usage: /session new|save|load|list[/yellow]"); return
         
         if args[0] == 'new':
             self._apply_prompt(self.default_prompt_name)
-            self.console.print(f"[bold green]✓ New session started with default prompt '{self.default_prompt_name}'.[/bold green]")
+            self.output.print(f"[bold green]✓ New session started with default prompt '{self.default_prompt_name}'.[/bold green]")
             self._log("info", f"Started new session with prompt '{self.default_prompt_name}'")
         elif args[0] == 'save':
             if len(args) < 2:
-                self.console.print("[yellow]Usage: /session save <name>[/yellow]"); return
+                self.output.print("[yellow]Usage: /session save <name>[/yellow]"); return
             session_name = args[1]
             session_file = self.sessions_dir / f"{session_name}.json"
             try:
@@ -928,14 +1307,14 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                         "prompt": self.active_prompt_name,
                         "model": self.current_model
                     }, f, ensure_ascii=False, indent=2)
-                self.console.print(f"[bold green]✓ Session saved as '{session_name}'.[/bold green]")
+                self.output.print(f"[bold green]✓ Session saved as '{session_name}'.[/bold green]")
                 self._log("info", f"Saved session as '{session_name}'")
             except Exception as e:
-                self.console.print(f"[bold red]Error saving session: {e}[/bold red]")
+                self.output.print(f"[bold red]Error saving session: {e}[/bold red]")
                 self._log("error", f"Failed to save session '{session_name}': {e}")
         elif args[0] == 'load':
             if len(args) < 2:
-                self.console.print("[yellow]Usage: /session load <name>[/yellow]"); return
+                self.output.print("[yellow]Usage: /session load <name>[/yellow]"); return
             session_name = args[1]
             session_file = self.sessions_dir / f"{session_name}.json"
             try:
@@ -945,48 +1324,48 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 self.session_cost = session_data.get("cost", 0.0)
                 self.active_prompt_name = session_data.get("prompt", self.default_prompt_name)
                 self.current_model = session_data.get("model", self.current_model)
-                self.console.print(f"[bold green]✓ Session '{session_name}' loaded successfully.[/bold green]")
+                self.output.print(f"[bold green]✓ Session '{session_name}' loaded successfully.[/bold green]")
                 self._log("info", f"Loaded session '{session_name}'")
             except FileNotFoundError:
-                self.console.print(f"[bold red]Session '{session_name}' not found.[/bold red]")
+                self.output.print(f"[bold red]Session '{session_name}' not found.[/bold red]")
                 self._log("error", f"Session '{session_name}' not found")
             except Exception as e:
-                self.console.print(f"[bold red]Error loading session: {e}[/bold red]")
+                self.output.print(f"[bold red]Error loading session: {e}[/bold red]")
                 self._log("error", f"Failed to load session '{session_name}': {e}")
         elif args[0] == 'list':
             try:
                 sessions = [f.stem for f in self.sessions_dir.glob("*.json")]
                 if sessions:
-                    self.console.print("[bold]Saved sessions:[/bold]")
+                    self.output.print("[bold]Saved sessions:[/bold]")
                     for session in sessions:
-                        self.console.print(f"  - {session}")
+                        self.output.print(f"  - {session}")
                 else:
-                    self.console.print("[yellow]No saved sessions found.[/yellow]")
+                    self.output.print("[yellow]No saved sessions found.[/yellow]")
                 self._log("info", f"Listed {len(sessions)} saved sessions")
             except Exception as e:
-                self.console.print(f"[bold red]Error listing sessions: {e}[/bold red]")
+                self.output.print(f"[bold red]Error listing sessions: {e}[/bold red]")
                 self._log("error", f"Failed to list sessions: {e}")
         else:
-            self.console.print("[yellow]Usage: /session new|save|load|list[/yellow]")
+            self.output.print("[yellow]Usage: /session new|save|load|list[/yellow]")
         
     async def _handle_file_command(self, args: List[str]):
         if not args:
-            self.console.print("[yellow]Usage: /file upload <path>[/yellow]"); return
+            self.output.print("[yellow]Usage: /file upload <path>[/yellow]"); return
         
         if args[0] == 'upload':
             if len(args) < 2:
-                self.console.print("[yellow]Usage: /file upload <path>[/yellow]"); return
+                self.output.print("[yellow]Usage: /file upload <path>[/yellow]"); return
             file_path = args[1]
             try:
                 file = Path(file_path)
                 if not file.exists() or not file.is_file():
-                    self.console.print(f"[bold red]Error: File '{file_path}' not found.[/bold red]"); 
+                    self.output.print(f"[bold red]Error: File '{file_path}' not found.[/bold red]"); 
                     self._log("error", f"File upload failed: File '{file_path}' not found")
                     return
                 
                 file_size = file.stat().st_size
                 if file_size > 10 * 1024 * 1024:  # 10MB limit
-                    self.console.print("[bold red]Error: File size exceeds 10MB limit.[/bold red]"); 
+                    self.output.print("[bold red]Error: File size exceeds 10MB limit.[/bold red]"); 
                     self._log("error", f"File upload failed: File size exceeds 10MB limit")
                     return
                 
@@ -998,7 +1377,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                     # Add file content to chat context
                     file_info = f"[File: {file.name}]\n\n{content}"
                     self.session_messages.append({"role": "user", "content": file_info})
-                    self.console.print(f"[bold green]✓ File '{file.name}' uploaded and added to chat context.[/bold green]")
+                    self.output.print(f"[bold green]✓ File '{file.name}' uploaded and added to chat context.[/bold green]")
                     self._log("info", f"Uploaded file '{file.name}' ({file_size} bytes)")
                 elif extension in ['.pdf']:
                     try:
@@ -1008,22 +1387,22 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                             content = "\n".join([page.extract_text() for page in reader.pages])
                         file_info = f"[PDF File: {file.name}]\n\n{content}"
                         self.session_messages.append({"role": "user", "content": file_info})
-                        self.console.print(f"[bold green]✓ PDF file '{file.name}' uploaded and added to chat context.[/bold green]")
+                        self.output.print(f"[bold green]✓ PDF file '{file.name}' uploaded and added to chat context.[/bold green]")
                         self._log("info", f"Uploaded PDF file '{file.name}' ({file_size} bytes)")
                     except ImportError:
-                        self.console.print("[bold red]Error: PyPDF2 is not installed. Please install it with 'pip install PyPDF2'.[/bold red]")
+                        self.output.print("[bold red]Error: PyPDF2 is not installed. Please install it with 'pip install PyPDF2'.[/bold red]")
                         self._log("error", "PDF file upload failed: PyPDF2 is not installed")
                     except Exception as e:
-                        self.console.print(f"[bold red]Error reading PDF file: {e}[/bold red]")
+                        self.output.print(f"[bold red]Error reading PDF file: {e}[/bold red]")
                         self._log("error", f"PDF file upload failed: {e}")
                 else:
-                    self.console.print(f"[bold red]Error: Unsupported file format '{extension}'.[/bold red]")
+                    self.output.print(f"[bold red]Error: Unsupported file format '{extension}'.[/bold red]")
                     self._log("error", f"File upload failed: Unsupported file format '{extension}'")
             except Exception as e:
-                self.console.print(f"[bold red]Error uploading file: {e}[/bold red]")
+                self.output.print(f"[bold red]Error uploading file: {e}[/bold red]")
                 self._log("error", f"File upload failed: {e}")
         else:
-            self.console.print("[yellow]Usage: /file upload <path>[/yellow]")
+            self.output.print("[yellow]Usage: /file upload <path>[/yellow]")
 
     async def _handle_language_command(self, args: List[str]):
         """Handle language commands: view current language, list available languages, or switch language."""
@@ -1034,11 +1413,11 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 "zh": "中文"
             }
             current_language_name = language_names.get(self.language, self.language)
-            self.console.print(f"[bold]Current language:[/bold] {current_language_name} ({self.language})")
-            self.console.print("[bold]Available languages:[/bold]")
+            self.output.print(f"[bold]Current language:[/bold] {current_language_name} ({self.language})")
+            self.output.print("[bold]Available languages:[/bold]")
             for lang_code, lang_name in language_names.items():
-                self.console.print(f"  - {lang_name} ({lang_code})")
-            self.console.print("[bold]Usage:[/bold] /language <code> to switch language")
+                self.output.print(f"  - {lang_name} ({lang_code})")
+            self.output.print("[bold]Usage:[/bold] /language <code> to switch language")
             return
         
         new_language = args[0].lower()
@@ -1053,14 +1432,14 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 "zh": "中文"
             }
             new_language_name = language_names.get(new_language, new_language)
-            self.console.print(f"[bold green]✓ Switched language to {new_language_name} ({new_language})[/bold green]")
+            self.output.print(f"[bold green]✓ Switched language to {new_language_name} ({new_language})[/bold green]")
             self._log("info", f"Switched language from {old_language} to {new_language}")
         else:
-            self.console.print(f"[bold red]Error: Language '{new_language}' not supported.[/bold red]")
+            self.output.print(f"[bold red]Error: Language '{new_language}' not supported.[/bold red]")
             self._log("error", f"Failed to switch language: Language '{new_language}' not supported")
         
     async def _handle_export_command(self, args: List[str]):
-        if not args: self.console.print("[yellow]Usage: /export <md|json|html|md-rendered>[/yellow]"); return
+        if not args: self.output.print("[yellow]Usage: /export <md|json|html|md-rendered>[/yellow]"); return
         fmt = args[0].lower(); filename = f"freechat_session_{self.session_name or int(time.time())}.{fmt if fmt != 'md-rendered' else 'html'}"
         try:
             if fmt == "md":
@@ -1120,9 +1499,9 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                         html_content += f'<div class=\"rendered-md\">{rendered_content}</div>\n</div>\n<hr>\n'
                 html_content += "</body>\n</html>"
                 with open(self.sessions_dir.parent / filename, "w", encoding="utf-8") as f: f.write(html_content)
-            else: self.console.print(f"[bold red]Error: Unknown format '{fmt}'.[/bold red]"); return
-            self.console.print(f"[bold green]✓ Session exported to {filename}[/bold green]")
-        except Exception as e: self.console.print(f"[bold red]Error exporting session: {e}[/bold red]")
+            else: self.output.print(f"[bold red]Error: Unknown format '{fmt}'.[/bold red]"); return
+            self.output.print(f"[bold green]✓ Session exported to {filename}[/bold green]")
+        except Exception as e: self.output.print(f"[bold red]Error exporting session: {e}[/bold red]")
 
     async def _handle_skill_command(self, args: List[str]):
         """Handle /skill command for skill management."""
@@ -1130,39 +1509,39 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             # List installed skills
             skills = self.skill_registry.list_skills()
             if not skills:
-                self.console.print("[yellow]No skills installed.[/yellow]")
+                self.output.print("[yellow]No skills installed.[/yellow]")
                 return
             table = Table("Name", "Version", "Description", "Tools")
             for skill in skills:
                 tool_count = len(skill.tools) if skill.tools else 0
                 table.add_row(skill.name, skill.version, skill.description[:50], str(tool_count))
-            self.console.print(table)
+            self.output.print(table)
 
         elif args[0] == "install" and len(args) > 1:
             # Install skill from directory
             source = args[1]
-            with self.console.status(f"[bold green]Installing skill from {source}..."):
+            with self.output.status(f"[bold green]Installing skill from {source}..."):
                 success, message = self.skill_registry.install(source)
             if success:
-                self.console.print(f"[bold green]✓ {message}[/bold green]")
+                self.output.print(f"[bold green]✓ {message}[/bold green]")
             else:
-                self.console.print(f"[bold red]✗ {message}[/bold red]")
+                self.output.print(f"[bold red]✗ {message}[/bold red]")
 
         elif args[0] == "uninstall" and len(args) > 1:
             # Uninstall skill
             skill_name = args[1]
             success, message = self.skill_registry.uninstall(skill_name)
             if success:
-                self.console.print(f"[bold green]✓ {message}[/bold green]")
+                self.output.print(f"[bold green]✓ {message}[/bold green]")
             else:
-                self.console.print(f"[bold red]✗ {message}[/bold red]")
+                self.output.print(f"[bold red]✗ {message}[/bold red]")
 
         elif args[0] == "info" and len(args) > 1:
             # Show skill info
             skill_name = args[1]
             skill = self.skill_registry.get(skill_name)
             if skill:
-                self.console.print(Panel(
+                self.output.print(Panel(
                     f"[bold]{skill.name}[/bold] v{skill.version}\n"
                     f"Author: {skill.author}\n"
                     f"Description: {skill.description}\n"
@@ -1170,50 +1549,50 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                     title="Skill Information"
                 ))
             else:
-                self.console.print(f"[bold red]Skill '{skill_name}' not found.[/bold red]")
+                self.output.print(f"[bold red]Skill '{skill_name}' not found.[/bold red]")
 
         elif args[0] == "registry":
             await self._handle_registry_command(args[1:])
 
         else:
-            self.console.print("[yellow]Usage:[/yellow]")
-            self.console.print("  /skill list                      - List installed skills")
-            self.console.print("  /skill install <path>            - Install skill from local directory")
-            self.console.print("  /skill install github:user/repo   - Install from GitHub")
-            self.console.print("  /skill install gitlab:user/repo   - Install from GitLab")
-            self.console.print("  /skill uninstall <name>          - Uninstall a skill")
-            self.console.print("  /skill info <name>               - Show skill information")
-            self.console.print("  /skill registry list             - List configured registries")
-            self.console.print("  /skill registry add <name> <url> - Add a custom registry")
-            self.console.print("  /skill registry use <name>       - Set default registry")
+            self.output.print("[yellow]Usage:[/yellow]")
+            self.output.print("  /skill list                      - List installed skills")
+            self.output.print("  /skill install <path>            - Install skill from local directory")
+            self.output.print("  /skill install github:user/repo   - Install from GitHub")
+            self.output.print("  /skill install gitlab:user/repo   - Install from GitLab")
+            self.output.print("  /skill uninstall <name>          - Uninstall a skill")
+            self.output.print("  /skill info <name>               - Show skill information")
+            self.output.print("  /skill registry list             - List configured registries")
+            self.output.print("  /skill registry add <name> <url> - Add a custom registry")
+            self.output.print("  /skill registry use <name>       - Set default registry")
 
     async def _handle_memory_command(self, args: List[str]):
         """Handle /memory command for memory management."""
         if not args:
-            self.console.print("[yellow]Usage:[/yellow]")
-            self.console.print("  /memory remember <text> [--cat <c>] [--tags <t1,t2>]")
-            self.console.print("                               - Store a new memory")
-            self.console.print("  /memory recall <query>         - Search memories by keyword")
-            self.console.print("  /memory search <query> [opts]  - Advanced search with filters")
-            self.console.print("  /memory list [category]        - List memories")
-            self.console.print("  /memory top [n]                - Show highest value memories")
-            self.console.print("  /memory recent [n]             - Show recently accessed memories")
-            self.console.print("  /memory categories             - List all categories")
-            self.console.print("  /memory view <id>              - View a single memory in detail")
-            self.console.print("  /memory edit <id> <content>    - Edit memory content")
-            self.console.print("  /memory tag <id> <tags...>     - Set tags for a memory")
-            self.console.print("  /memory category <id> <cat>    - Change memory category")
-            self.console.print("  /memory priority <id> <1-10>   - Set memory importance")
-            self.console.print("  /memory related <id>           - Find related memories")
-            self.console.print("  /memory forget <id>            - Delete a memory")
-            self.console.print("  /memory restore <id>           - Restore an archived memory")
-            self.console.print("  /memory compress               - Run auction compression")
-            self.console.print("  /memory clear --force          - Delete ALL memories")
-            self.console.print("  /memory stats                  - Show statistics")
-            self.console.print("  /memory branch                 - List branches with memories")
-            self.console.print("  /memory merge <from> <to>      - Merge branch memories")
-            self.console.print("  /memory export <file.json>     - Export memories to JSON")
-            self.console.print("  /memory import <file.json>     - Import memories from JSON")
+            self.output.print("[yellow]Usage:[/yellow]")
+            self.output.print("  /memory remember <text> [--cat <c>] [--tags <t1,t2>]")
+            self.output.print("                               - Store a new memory")
+            self.output.print("  /memory recall <query>         - Search memories by keyword")
+            self.output.print("  /memory search <query> [opts]  - Advanced search with filters")
+            self.output.print("  /memory list [category]        - List memories")
+            self.output.print("  /memory top [n]                - Show highest value memories")
+            self.output.print("  /memory recent [n]             - Show recently accessed memories")
+            self.output.print("  /memory categories             - List all categories")
+            self.output.print("  /memory view <id>              - View a single memory in detail")
+            self.output.print("  /memory edit <id> <content>    - Edit memory content")
+            self.output.print("  /memory tag <id> <tags...>     - Set tags for a memory")
+            self.output.print("  /memory category <id> <cat>    - Change memory category")
+            self.output.print("  /memory priority <id> <1-10>   - Set memory importance")
+            self.output.print("  /memory related <id>           - Find related memories")
+            self.output.print("  /memory forget <id>            - Delete a memory")
+            self.output.print("  /memory restore <id>           - Restore an archived memory")
+            self.output.print("  /memory compress               - Run auction compression")
+            self.output.print("  /memory clear --force          - Delete ALL memories")
+            self.output.print("  /memory stats                  - Show statistics")
+            self.output.print("  /memory branch                 - List branches with memories")
+            self.output.print("  /memory merge <from> <to>      - Merge branch memories")
+            self.output.print("  /memory export <file.json>     - Export memories to JSON")
+            self.output.print("  /memory import <file.json>     - Import memories from JSON")
             return
 
         cmd = args[0]
@@ -1242,24 +1621,24 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 tags = [t.strip() for t in parts[1].strip().split(",") if t.strip()]
 
             if not text:
-                self.console.print("[yellow]Usage: /memory remember <text> [--cat <category>] [--tags <tag1,tag2>][/yellow]")
+                self.output.print("[yellow]Usage: /memory remember <text> [--cat <category>] [--tags <tag1,tag2>][/yellow]")
                 return
 
             # Check for duplicates
             similar = self.memory_manager.find_similar(text)
             if similar:
-                self.console.print(f"[yellow]⚠ Similar memories found ({len(similar)}):[/yellow]")
+                self.output.print(f"[yellow]⚠ Similar memories found ({len(similar)}):[/yellow]")
                 for mem in similar[:3]:
                     content = mem.content[:50] + "..." if len(mem.content) > 50 else mem.content
-                    self.console.print(f"  [dim]{mem.id[:8]}: {content}[/dim]")
-                self.console.print("[dim]Consider updating existing memory with /memory edit[/dim]")
+                    self.output.print(f"  [dim]{mem.id[:8]}: {content}[/dim]")
+                self.output.print("[dim]Consider updating existing memory with /memory edit[/dim]")
 
             memory_id = self.memory_manager.remember(text, category=category, tags=tags)
-            self.console.print(f"[bold green]✓ Memory recorded ({memory_id})[/bold green]")
+            self.output.print(f"[bold green]✓ Memory recorded ({memory_id})[/bold green]")
             if category != "context":
-                self.console.print(f"[dim]  Category: {category}[/dim]")
+                self.output.print(f"[dim]  Category: {category}[/dim]")
             if tags:
-                self.console.print(f"[dim]  Tags: {', '.join(tags)}[/dim]")
+                self.output.print(f"[dim]  Tags: {', '.join(tags)}[/dim]")
 
         elif cmd == "recall" and len(args) > 1:
             query = " ".join(args[1:])
@@ -1269,9 +1648,9 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 for mem in memories:
                     content = mem.content[:40] + "..." if len(mem.content) > 40 else mem.content
                     table.add_row(mem.id[:8], mem.category, content, f"{mem.value_score:.2f}", str(mem.access_count))
-                self.console.print(table)
+                self.output.print(table)
             else:
-                self.console.print("[yellow]No memories found.[/yellow]")
+                self.output.print("[yellow]No memories found.[/yellow]")
 
         elif cmd == "list":
             category_filter = args[1] if len(args) > 1 else None
@@ -1283,12 +1662,12 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                     content = mem.content[:40] + "..." if len(mem.content) > 40 else mem.content
                     archived = "[dim]A[/dim]" if getattr(mem, 'compressed', False) else ""
                     table.add_row(mem.id[:8], mem.category, content, f"{mem.value_score:.2f}", str(mem.access_count), archived)
-                self.console.print(table)
+                self.output.print(table)
                 if len(memories) > 30:
-                    self.console.print(f"[dim]... and {len(memories) - 30} more memories[/dim]")
+                    self.output.print(f"[dim]... and {len(memories) - 30} more memories[/dim]")
             else:
                 msg = f"[yellow]No memories in category '{category_filter}'.[/yellow]" if category_filter else "[yellow]No memories stored.[/yellow]"
-                self.console.print(msg)
+                self.output.print(msg)
 
         elif cmd == "search" and len(args) > 1:
             # Parse advanced search: query [--cat c] [--tags t1,t2] [--min-score 0.5] [--min-importance 5]
@@ -1358,10 +1737,10 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 for mem in memories:
                     content = mem.content[:40] + "..." if len(mem.content) > 40 else mem.content
                     table.add_row(mem.id[:8], mem.category, content, f"{mem.value_score:.2f}", str(mem.importance))
-                self.console.print(table)
-                self.console.print(f"[dim]Found {len(memories)} result(s)[/dim]")
+                self.output.print(table)
+                self.output.print(f"[dim]Found {len(memories)} result(s)[/dim]")
             else:
-                self.console.print("[yellow]No memories found matching criteria.[/yellow]")
+                self.output.print("[yellow]No memories found matching criteria.[/yellow]")
 
         elif cmd == "top":
             try:
@@ -1374,9 +1753,9 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 for i, mem in enumerate(memories, 1):
                     content = mem.content[:40] + "..." if len(mem.content) > 40 else mem.content
                     table.add_row(str(i), mem.id[:8], mem.category, content, f"{mem.value_score:.2f}")
-                self.console.print(table)
+                self.output.print(table)
             else:
-                self.console.print("[yellow]No memories stored.[/yellow]")
+                self.output.print("[yellow]No memories stored.[/yellow]")
 
         elif cmd == "recent":
             try:
@@ -1390,9 +1769,9 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                     content = mem.content[:40] + "..." if len(mem.content) > 40 else mem.content
                     accessed = time.strftime('%Y-%m-%d %H:%M', time.localtime(mem.last_accessed)) if mem.last_accessed else "Never"
                     table.add_row(str(i), mem.id[:8], mem.category, content, accessed)
-                self.console.print(table)
+                self.output.print(table)
             else:
-                self.console.print("[yellow]No recently accessed memories.[/yellow]")
+                self.output.print("[yellow]No recently accessed memories.[/yellow]")
 
         elif cmd == "categories":
             categories = self.memory_manager.get_categories()
@@ -1400,15 +1779,15 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 table = Table("Category", "Count", title="Memory Categories")
                 for cat, count in categories:
                     table.add_row(cat, str(count))
-                self.console.print(table)
+                self.output.print(table)
             else:
-                self.console.print("[yellow]No memories stored.[/yellow]")
+                self.output.print("[yellow]No memories stored.[/yellow]")
 
         elif cmd == "related" and len(args) > 1:
             memory_id = args[1]
             source = self.memory_manager._store.get_memory(memory_id)
             if not source:
-                self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+                self.output.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
             else:
                 related = self.memory_manager.get_related(memory_id)
                 if related:
@@ -1416,52 +1795,52 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                     for mem in related:
                         content = mem.content[:50] + "..." if len(mem.content) > 50 else mem.content
                         table.add_row(mem.id[:8], mem.category, content, f"{mem.value_score:.2f}")
-                    self.console.print(f"[bold cyan]Memories related to {memory_id}:[/bold cyan]")
-                    self.console.print(table)
+                    self.output.print(f"[bold cyan]Memories related to {memory_id}:[/bold cyan]")
+                    self.output.print(table)
                 else:
-                    self.console.print("[yellow]No related memories found.[/yellow]")
+                    self.output.print("[yellow]No related memories found.[/yellow]")
 
         elif cmd == "view" and len(args) > 1:
             memory_id = args[1]
             mem = self.memory_manager._store.get_memory(memory_id)
             if mem:
-                self.console.print(f"\n[bold cyan]Memory: {mem.id}[/bold cyan]")
-                self.console.print(f"  Category: {mem.category}")
-                self.console.print(f"  Importance: {mem.importance}/10")
-                self.console.print(f"  Score: {mem.value_score:.2f}")
-                self.console.print(f"  Access count: {mem.access_count}")
-                self.console.print(f"  Tags: {', '.join(mem.tags) if mem.tags else '(none)'}")
-                self.console.print(f"  Branch: {mem.branch or '(global)'}")
-                self.console.print(f"  Created: {time.strftime('%Y-%m-%d %H:%M', time.localtime(mem.created_at))}")
+                self.output.print(f"\n[bold cyan]Memory: {mem.id}[/bold cyan]")
+                self.output.print(f"  Category: {mem.category}")
+                self.output.print(f"  Importance: {mem.importance}/10")
+                self.output.print(f"  Score: {mem.value_score:.2f}")
+                self.output.print(f"  Access count: {mem.access_count}")
+                self.output.print(f"  Tags: {', '.join(mem.tags) if mem.tags else '(none)'}")
+                self.output.print(f"  Branch: {mem.branch or '(global)'}")
+                self.output.print(f"  Created: {time.strftime('%Y-%m-%d %H:%M', time.localtime(mem.created_at))}")
                 if mem.compressed:
-                    self.console.print(f"  [dim]Status: Compressed[/dim]")
-                self.console.print(f"\n[bold]Content:[/bold]\n{mem.content}\n")
+                    self.output.print(f"  [dim]Status: Compressed[/dim]")
+                self.output.print(f"\n[bold]Content:[/bold]\n{mem.content}\n")
             else:
-                self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+                self.output.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
 
         elif cmd == "edit" and len(args) > 2:
             memory_id = args[1]
             new_content = " ".join(args[2:])
             if self.memory_manager.update_memory(memory_id, content=new_content):
-                self.console.print(f"[bold green]✓ Memory updated[/bold green]")
+                self.output.print(f"[bold green]✓ Memory updated[/bold green]")
             else:
-                self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+                self.output.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
 
         elif cmd == "tag" and len(args) > 2:
             memory_id = args[1]
             new_tags = args[2:]
             if self.memory_manager.update_memory(memory_id, tags=list(new_tags)):
-                self.console.print(f"[bold green]✓ Tags updated: {', '.join(new_tags)}[/bold green]")
+                self.output.print(f"[bold green]✓ Tags updated: {', '.join(new_tags)}[/bold green]")
             else:
-                self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+                self.output.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
 
         elif cmd == "category" and len(args) > 2:
             memory_id = args[1]
             new_category = args[2]
             if self.memory_manager.update_memory(memory_id, category=new_category):
-                self.console.print(f"[bold green]✓ Category updated to '{new_category}'[/bold green]")
+                self.output.print(f"[bold green]✓ Category updated to '{new_category}'[/bold green]")
             else:
-                self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+                self.output.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
 
         elif cmd == "priority" and len(args) > 2:
             memory_id = args[1]
@@ -1469,47 +1848,47 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 importance = int(args[2])
                 if 1 <= importance <= 10:
                     if self.memory_manager.update_memory(memory_id, importance=importance):
-                        self.console.print(f"[bold green]✓ Importance set to {importance}/10[/bold green]")
+                        self.output.print(f"[bold green]✓ Importance set to {importance}/10[/bold green]")
                     else:
-                        self.console.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
+                        self.output.print(f"[bold red]Memory '{memory_id}' not found.[/bold red]")
                 else:
-                    self.console.print("[yellow]Importance must be between 1 and 10.[/yellow]")
+                    self.output.print("[yellow]Importance must be between 1 and 10.[/yellow]")
             except ValueError:
-                self.console.print("[yellow]Importance must be a number between 1 and 10.[/yellow]")
+                self.output.print("[yellow]Importance must be a number between 1 and 10.[/yellow]")
 
         elif cmd == "forget" and len(args) > 1:
             memory_id = args[1]
             if self.memory_manager.forget(memory_id):
-                self.console.print(f"[bold green]✓ Memory deleted[/bold green]")
+                self.output.print(f"[bold green]✓ Memory deleted[/bold green]")
             else:
-                self.console.print(f"[bold red]Memory not found[/bold red]")
+                self.output.print(f"[bold red]Memory not found[/bold red]")
 
         elif cmd == "restore" and len(args) > 1:
             memory_id = args[1]
             if self.memory_manager.restore(memory_id):
-                self.console.print(f"[bold green]✓ Memory restored[/bold green]")
+                self.output.print(f"[bold green]✓ Memory restored[/bold green]")
             else:
-                self.console.print(f"[bold red]Memory '{memory_id}' not found or not archived.[/bold red]")
+                self.output.print(f"[bold red]Memory '{memory_id}' not found or not archived.[/bold red]")
 
         elif cmd == "compress":
             archived = self.memory_manager.compress_memories()
-            self.console.print(f"[bold green]✓ Compressed {archived} memories (archived low-value memories)[/bold green]")
+            self.output.print(f"[bold green]✓ Compressed {archived} memories (archived low-value memories)[/bold green]")
 
         elif cmd == "clear":
-            self.console.print("[bold red]⚠️ This will delete ALL memories permanently![/bold red]")
-            self.console.print("[yellow]Type 'yes' to confirm, or anything else to cancel:[/yellow]")
+            self.output.print("[bold red]⚠️ This will delete ALL memories permanently![/bold red]")
+            self.output.print("[yellow]Type 'yes' to confirm, or anything else to cancel:[/yellow]")
             # Simple confirmation using prompt_toolkit's application prompt
             # Since we can't easily do interactive confirmation in async context,
             # we'll use a simpler approach - require "--force" flag
             if len(args) > 1 and args[1] == "--force":
                 count = self.memory_manager.clear_all()
-                self.console.print(f"[bold green]✓ Cleared {count} memories[/bold green]")
+                self.output.print(f"[bold green]✓ Cleared {count} memories[/bold green]")
             else:
-                self.console.print("[dim]Run '/memory clear --force' to confirm deletion.[/dim]")
+                self.output.print("[dim]Run '/memory clear --force' to confirm deletion.[/dim]")
 
         elif cmd == "stats":
             stats = self.memory_manager.get_stats()
-            self.console.print(Panel(
+            self.output.print(Panel(
                 f"Total memories: {stats.get('total_memories', 0)}\n"
                 f"Active: {stats.get('active_memories', 0)} | Archived: {stats.get('archived_memories', 0)}\n"
                 f"Global: {stats.get('global_memories', 0)} | Branches: {stats.get('branches', 0)}\n"
@@ -1521,20 +1900,20 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             branches = self.branch_memory_manager.list_branches_with_memories()
             current = self.branch_memory_manager.get_current_branch() or "(none)"
             if branches:
-                self.console.print(f"[bold cyan]Current branch:[/bold cyan] {current}")
+                self.output.print(f"[bold cyan]Current branch:[/bold cyan] {current}")
                 table = Table("Branch", "Status")
                 for branch in branches:
                     status = "[bold yellow]← current[/bold yellow]" if branch == current else ""
                     table.add_row(branch, status)
-                self.console.print(table)
+                self.output.print(table)
             else:
-                self.console.print(f"[yellow]No branch-specific memories. Current branch: {current}[/yellow]")
+                self.output.print(f"[yellow]No branch-specific memories. Current branch: {current}[/yellow]")
 
         elif cmd == "merge" and len(args) >= 3:
             from_branch = args[1]
             to_branch = args[2]
             count = self.branch_memory_manager.merge_branch_memories(from_branch, to_branch)
-            self.console.print(f"[bold green]✓ Merged {count} memories from '{from_branch}' to '{to_branch}'[/bold green]")
+            self.output.print(f"[bold green]✓ Merged {count} memories from '{from_branch}' to '{to_branch}'[/bold green]")
 
         elif cmd == "export" and len(args) > 1:
             file_path = Path(args[1])
@@ -1542,23 +1921,23 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 file_path = file_path.with_suffix(".json")
             count = self.memory_manager.export_memories(file_path)
             if count > 0:
-                self.console.print(f"[bold green]✓ Exported {count} memories to {file_path}[/bold green]")
+                self.output.print(f"[bold green]✓ Exported {count} memories to {file_path}[/bold green]")
             else:
-                self.console.print(f"[yellow]No memories to export or export failed.[/yellow]")
+                self.output.print(f"[yellow]No memories to export or export failed.[/yellow]")
 
         elif cmd == "import" and len(args) > 1:
             file_path = Path(args[1])
             if not file_path.exists():
-                self.console.print(f"[bold red]File not found: {file_path}[/bold red]")
+                self.output.print(f"[bold red]File not found: {file_path}[/bold red]")
             else:
                 count = self.memory_manager.import_memories(file_path)
                 if count > 0:
-                    self.console.print(f"[bold green]✓ Imported {count} memories from {file_path}[/bold green]")
+                    self.output.print(f"[bold green]✓ Imported {count} memories from {file_path}[/bold green]")
                 else:
-                    self.console.print(f"[yellow]No memories imported or import failed.[/yellow]")
+                    self.output.print(f"[yellow]No memories imported or import failed.[/yellow]")
 
         else:
-            self.console.print("[yellow]Unknown memory command. Type /memory for usage.[/yellow]")
+            self.output.print("[yellow]Unknown memory command. Type /memory for usage.[/yellow]")
 
     def _register_builtin_tools(self):
         """Register built-in tools into the tool registry."""
@@ -1623,11 +2002,18 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         if isinstance(enabled_tools, list):
             for tool_name in enabled_tools:
                 if not self.tool_registry.enable(tool_name):
-                    self.console.print(f"[yellow]Warning: Tool '{tool_name}' listed in config but not found in registry.[/yellow]")
+                    self.output.print(f"[yellow]Warning: Tool '{tool_name}' listed in config but not found in registry.[/yellow]")
 
     async def _handle_prompt(self, prompt: str):
-        self.console.print(f"[bold cyan]You:[/bold cyan] {prompt}")
-        if not (provider := self.provider_factory.get_provider(self.current_model)): self.console.print(f"[bold red]Error: Provider for '{self.current_model}' not found.[/bold red]"); return
+        self._tui_buffer.append_formatted('class:user-label', 'You: ')
+        self._tui_buffer.append_raw(f"{prompt}\n")
+        if self._tui_app:
+            self._tui_app.invalidate()
+        if not (provider := self.provider_factory.get_provider(self.current_model)):
+            self._tui_buffer.append_formatted('class:error-text', f"Error: Provider for '{self.current_model}' not found.\n")
+            if self._tui_app:
+                self._tui_app.invalidate()
+            return
         self.session_messages.append({"role": "user", "content": prompt})
         prompt_tokens = self._count_tokens(prompt)
 
@@ -1642,8 +2028,13 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         provider_name, model_name = self.current_model.split('/', 1)
 
         full_response, start_time = "", time.time()
+        self._tui_buffer.show_typing()
+        if self._tui_app:
+            self._tui_app.invalidate()
         try:
-            self.console.print("[bold magenta]AI:[/bold magenta] ", end="")
+            self._tui_buffer.append_formatted('class:ai-label', 'AI: ')
+            if self._tui_app:
+                self._tui_app.invalidate()
             stream = provider.stream_chat(self.session_messages, model_name)
             buffer_len = 0
             async for chunk in stream:
@@ -1653,22 +2044,37 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 if buffer_len >= self._STREAM_BUFFER_THRESHOLD:
                     await self._flush_stream_buffer_async()
                     buffer_len = 0
-            self.console.print()
+            self._tui_buffer.append_raw('\n')
+            if self._tui_app:
+                self._tui_app.invalidate()
         except httpx.HTTPStatusError as e:
             try: await e.response.aread(); error_body = e.response.text
             except Exception: error_body = str(e)
-            self.console.print(f"\n[bold red]API Error {e.response.status_code}:[/bold red] {error_body}"); self.session_messages.pop(); return
-        except Exception as e: self.console.print(f"\n[bold red]Error: {e}[/bold red]"); self.session_messages.pop(); return
+            self.output.print(f"\n[bold red]API Error {e.response.status_code}:[/bold red] {error_body}")
+            if self.debug:
+                import traceback
+                self.output.print(f"[dim]{traceback.format_exc()}[/dim]")
+            self.session_messages.pop(); return
+        except Exception as e:
+            self.output.print(f"\n[bold red]Error: {e}[/bold red]")
+            if self.debug:
+                import traceback
+                self.output.print(f"[dim]{traceback.format_exc()}[/dim]")
+            self.session_messages.pop(); return
         finally:
+            self._tui_buffer.hide_typing()
             if self._stream_buffer:
                 await self._flush_stream_buffer_async()
             if temp_memory_msg and temp_memory_msg in self.session_messages:
                 self.session_messages.remove(temp_memory_msg)
+            if self._tui_app:
+                self._tui_app.invalidate()
         self.session_messages.append({"role": "assistant", "content": full_response})
-        self._manage_message_history()  # Manage message history after adding response
+        self._manage_message_history()
         cost = provider.calculate_cost(prompt_tokens, self._count_tokens(full_response), model_name)
         if cost is not None: self.session_cost += cost
-        self.console.print(f"[dim]Time: {(time.time() - start_time):.2f}s | Cost: {'N/A' if cost is None else f'${cost:.6f}'}[/dim]")
+        if self._tui_app:
+            self._tui_app.invalidate()
         
     async def _inject_memory_context(self, prompt: str) -> str:
         """Recall relevant memories and format them for injection into chat context."""
@@ -1702,14 +2108,19 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 pass
     
     async def run(self):
-        self._display_welcome(); await self._fetch_models()
-        while True:
-            try:
-                inp = await self.prompt_session.prompt_async(">", bottom_toolbar=self._get_bottom_toolbar, style=self.style, completer=self._create_completer(), refresh_interval=0.5)
-                if inp.strip(): await (self._handle_command if inp.startswith('/') else self._handle_prompt)(inp)
-            except (EOFError, KeyboardInterrupt): 
-                await self.close_providers()
-                self.console.print("\n[bold]Goodbye![/bold]"); return
+        # Show welcome banner in TUI chat area
+        banner = Text("FreeChat v2.4.0", style="bold magenta", justify="center")
+        info = Text("Type /help for commands. Press F2 for sidebar.", style="dim", justify="center")
+        self._tui_buffer.print(Panel.fit(Text.assemble(banner, "\n", info), padding=(1, 4)))
+
+        # Build TUI and fetch models in background
+        self._tui_active = True
+        app = self._build_tui_layout()
+        app.create_background_task(self._fetch_models())
+
+        # Run the TUI (blocks until app.exit() is called)
+        await app.run_async()
+        await self.close_providers()
 
 # --- Tool System ---
 @dataclass

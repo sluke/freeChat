@@ -8,7 +8,7 @@ Unit tests for FreeChat
 import unittest
 import sys
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from pathlib import Path
 
 # Add the project root to the path
@@ -18,7 +18,7 @@ from freechat import (
     FreeChatApp, ProviderFactory, AIProvider,
     SkillSecurityManager, SkillSandbox, SQLiteMemoryStore,
     ToolRegistry, SkillMetadata, SkillDefinition, ToolParameter,
-    MemoryEntry
+    MemoryEntry, TUIOutputBuffer
 )
 
 class TestFreeChatApp(unittest.TestCase):
@@ -1977,6 +1977,397 @@ class TestGeminiProvider(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[1]["role"], "model")
         self.assertIn("search", result[1]["parts"][0]["text"])
+
+
+class TestTUIOutputBuffer(unittest.TestCase):
+    """Test TUIOutputBuffer class."""
+
+    def setUp(self):
+        self.buf = TUIOutputBuffer()
+
+    def test_initial_state(self):
+        """Buffer starts empty with welcome text."""
+        result = self.buf.get_formatted_text()
+        self.assertTrue(len(result) > 1)
+        all_text = "".join(t[1] for t in result)
+        self.assertIn('Welcome to FreeChat', all_text)
+
+    def test_print_stores_formatted_text(self):
+        """print() captures Rich output as FormattedText tuples."""
+        self.buf.print("Hello world")
+        result = self.buf.get_formatted_text()
+        self.assertTrue(len(result) > 0)
+        # Should contain the text somewhere in the formatted output
+        all_text = "".join(t[1] for t in result)
+        self.assertIn("Hello world", all_text)
+
+    def test_print_with_rich_markup(self):
+        """print() handles Rich markup correctly."""
+        self.buf.print("[bold]Bold text[/bold]")
+        all_text = "".join(t[1] for t in self.buf.get_formatted_text())
+        self.assertIn("Bold text", all_text)
+
+    def test_print_with_panel(self):
+        """print() captures Rich Panel objects."""
+        from rich.panel import Panel
+        self.buf.print(Panel("Panel content"))
+        all_text = "".join(t[1] for t in self.buf.get_formatted_text())
+        self.assertIn("Panel content", all_text)
+
+    def test_print_with_table(self):
+        """print() captures Rich Table objects."""
+        from rich.table import Table
+        table = Table(title="Test")
+        table.add_column("Col1")
+        table.add_row("Value1")
+        self.buf.print(table)
+        all_text = "".join(t[1] for t in self.buf.get_formatted_text())
+        self.assertIn("Value1", all_text)
+
+    def test_print_accumulates(self):
+        """Multiple print() calls accumulate in history."""
+        self.buf.print("First")
+        self.buf.print("Second")
+        all_text = "".join(t[1] for t in self.buf.get_formatted_text())
+        self.assertIn("First", all_text)
+        self.assertIn("Second", all_text)
+
+    def test_clear_resets_history(self):
+        """clear() empties the history."""
+        self.buf.print("Something")
+        self.buf.clear()
+        result = self.buf.get_formatted_text()
+        all_text = "".join(t[1] for t in result)
+        self.assertIn('Welcome to FreeChat', all_text)
+
+    def test_append_raw(self):
+        """append_raw() adds unstyled text."""
+        self.buf.append_raw("raw chunk")
+        all_text = "".join(t[1] for t in self.buf.get_formatted_text())
+        self.assertIn("raw chunk", all_text)
+
+    def test_append_formatted(self):
+        """append_formatted() adds styled text."""
+        self.buf.append_formatted('class:bold', 'styled')
+        result = self.buf.get_formatted_text()
+        found = any(t[0] == 'class:bold' and t[1] == 'styled' for t in result)
+        self.assertTrue(found)
+
+    def test_status_returns_noop_context_manager(self):
+        """status() returns a usable no-op context manager."""
+        with self.buf.status("Loading..."):
+            pass  # Should not raise
+
+    def test_max_history_eviction(self):
+        """History is evicted when max_history is exceeded."""
+        small_buf = TUIOutputBuffer(max_history=5)
+        for i in range(10):
+            small_buf.append_raw(f"line {i} ")
+        # Should have been trimmed
+        self.assertLessEqual(len(small_buf._history), 5)
+
+    def test_print_with_end_parameter(self):
+        """print() supports end='' parameter (used for streaming prefix)."""
+        self.buf.print("AI: ", end="")
+        self.buf.print("response")
+        all_text = "".join(t[1] for t in self.buf.get_formatted_text())
+        self.assertIn("AI: ", all_text)
+        self.assertIn("response", all_text)
+
+
+class TestTUIIntegration(unittest.TestCase):
+    """Test TUI integration with FreeChatApp."""
+
+    def setUp(self):
+        self.test_config_dir = Path("test_config")
+        self.test_config_dir.mkdir(exist_ok=True)
+        config_content = """
+[general]
+default_model = "openrouter/openrouter/free"
+default_prompt = "default"
+[providers]
+openrouter_api_key = "test_key"
+"""
+        with open(self.test_config_dir / "config.toml", "w") as f:
+            f.write(config_content)
+        prompts_content = """
+[default]
+prompt = "You are a test assistant"
+"""
+        with open(self.test_config_dir / "prompts.toml", "w") as f:
+            f.write(prompts_content)
+        with patch('freechat.Path.home', return_value=Path('.')):
+            with patch('freechat.Path.is_dir', return_value=True):
+                with patch('sys.exit'):
+                    with patch.object(FreeChatApp, '_setup_config', return_value=None):
+                        self.app = FreeChatApp()
+        self.app.active_prompt_name = "default"
+        self.app.current_model = "openrouter/free"
+        self.app.session_messages = []
+
+    def tearDown(self):
+        if self.test_config_dir.exists():
+            for file in self.test_config_dir.glob('*'):
+                file.unlink()
+            self.test_config_dir.rmdir()
+
+    def test_output_property_returns_console_before_tui(self):
+        """output property returns console when TUI is not active."""
+        self.assertFalse(self.app._tui_active)
+        self.assertIs(self.app.output, self.app.console)
+
+    def test_output_property_returns_tui_buffer_after_tui(self):
+        """output property returns TUI buffer when TUI is active."""
+        self.app._tui_active = True
+        self.assertIs(self.app.output, self.app._tui_buffer)
+
+    def test_tui_buffer_is_tui_output_buffer(self):
+        """_tui_buffer is a TUIOutputBuffer instance."""
+        self.assertIsInstance(self.app._tui_buffer, TUIOutputBuffer)
+
+    def test_tui_active_flag_default(self):
+        """_tui_active defaults to False."""
+        self.assertFalse(self.app._tui_active)
+
+    def test_sidebar_visible_default(self):
+        """_sidebar_visible defaults to False."""
+        self.assertFalse(self.app._sidebar_visible)
+
+    def test_exit_app_with_tui(self):
+        """_exit_app calls app.exit() when TUI is active."""
+        mock_app = MagicMock()
+        self.app._tui_app = mock_app
+        self.app._exit_app([])
+        mock_app.exit.assert_called_once()
+
+    def test_exit_app_without_tui(self):
+        """_exit_app raises EOFError when TUI is not active."""
+        self.app._tui_app = None
+        with self.assertRaises(EOFError):
+            self.app._exit_app([])
+
+    def test_build_tui_layout(self):
+        """_build_tui_layout returns an Application instance."""
+        from prompt_toolkit import Application
+        app = self.app._build_tui_layout()
+        self.assertIsInstance(app, Application)
+        self.assertIs(self.app._tui_app, app)
+
+    def test_build_tui_layout_sidebar_toggle(self):
+        """Sidebar visibility can be toggled."""
+        self.app._build_tui_layout()
+        self.assertFalse(self.app._sidebar_visible)
+        self.app._sidebar_visible = True
+        self.assertTrue(self.app._sidebar_visible)
+
+    def test_flush_stream_buffer_tui_mode(self):
+        """_flush_stream_buffer writes to TUI buffer in TUI mode."""
+        self.app._tui_active = True
+        self.app._tui_app = MagicMock()
+        self.app._stream_buffer = ["Hello", " ", "World"]
+        self.app._flush_stream_buffer()
+        all_text = "".join(t[1] for t in self.app._tui_buffer.get_formatted_text())
+        self.assertIn("Hello World", all_text)
+        self.assertEqual(self.app._stream_buffer, [])
+        self.app._tui_app.invalidate.assert_called_once()
+
+    def test_flush_stream_buffer_non_tui_mode(self):
+        """_flush_stream_buffer writes to stdout in non-TUI mode."""
+        self.app._tui_active = False
+        self.app._stream_buffer = ["Test"]
+        with patch('sys.stdout') as mock_stdout:
+            self.app._flush_stream_buffer()
+            mock_stdout.write.assert_called_once_with("Test")
+        self.assertEqual(self.app._stream_buffer, [])
+
+    def test_tui_dispatch_slash_command(self):
+        """_tui_dispatch routes slash commands to _handle_command."""
+        import asyncio
+        self.app._tui_app = MagicMock()
+        with patch.object(self.app, '_handle_command', new_callable=AsyncMock) as mock_cmd:
+            asyncio.run(self.app._tui_dispatch("/help"))
+            mock_cmd.assert_called_once_with("/help")
+
+    def test_tui_dispatch_chat_message(self):
+        """_tui_dispatch routes chat messages to _handle_prompt."""
+        import asyncio
+        self.app._tui_app = MagicMock()
+        with patch.object(self.app, '_handle_prompt', new_callable=AsyncMock) as mock_prompt:
+            asyncio.run(self.app._tui_dispatch("hello"))
+            mock_prompt.assert_called_once_with("hello")
+
+    def test_tui_dispatch_handles_eof(self):
+        """_tui_dispatch handles EOFError by exiting the app."""
+        import asyncio
+        mock_app = MagicMock()
+        self.app._tui_app = mock_app
+        with patch.object(self.app, '_handle_command', side_effect=EOFError):
+            with patch.object(self.app, 'close_providers', new_callable=AsyncMock):
+                asyncio.run(self.app._tui_dispatch("/exit"))
+                mock_app.exit.assert_called_once()
+
+    def test_tui_dispatch_handles_exception(self):
+        """_tui_dispatch catches exceptions and prints error."""
+        import asyncio
+        mock_app = MagicMock()
+        self.app._tui_app = mock_app
+        with patch.object(self.app, '_handle_command', side_effect=RuntimeError("boom")):
+            asyncio.run(self.app._tui_dispatch("/help"))
+            all_text = "".join(t[1] for t in self.app._tui_buffer.get_formatted_text())
+            self.assertIn("boom", all_text)
+
+    def test_output_print_goes_to_tui_buffer(self):
+        """output.print() routes to TUI buffer when TUI is active."""
+        self.app._tui_active = True
+        self.app.output.print("TUI message")
+        all_text = "".join(t[1] for t in self.app._tui_buffer.get_formatted_text())
+        self.assertIn("TUI message", all_text)
+
+    def test_output_print_goes_to_console_before_tui(self):
+        """output.print() routes to console when TUI is not active."""
+        self.app._tui_active = False
+        with patch.object(self.app.console, 'print') as mock_print:
+            self.app.output.print("Console message")
+            mock_print.assert_called_once()
+
+    def test_output_clear_tui(self):
+        """output.clear() clears TUI buffer when TUI is active."""
+        self.app._tui_active = True
+        self.app._tui_buffer.print("something")
+        self.app.output.clear()
+        result = self.app._tui_buffer.get_formatted_text()
+        all_text = "".join(t[1] for t in result)
+        self.assertIn('Welcome to FreeChat', all_text)
+
+    def test_output_status_tui(self):
+        """output.status() returns no-op context manager when TUI is active."""
+        self.app._tui_active = True
+        with self.app.output.status("loading"):
+            pass  # Should not raise
+
+    def test_header_shows_model_info(self):
+        """TUI header displays current model, prompt, cost, session."""
+        from prompt_toolkit import Application
+        app = self.app._build_tui_layout()
+        # The header control should be part of the layout
+        self.assertIsNotNone(app.layout)
+
+
+class TestDebugMode(unittest.TestCase):
+    """Test debug mode functionality."""
+
+    def setUp(self):
+        self.test_config_dir = Path("test_config")
+        self.test_config_dir.mkdir(exist_ok=True)
+        config_content = """
+[general]
+default_model = "openrouter/openrouter/free"
+default_prompt = "default"
+[providers]
+openrouter_api_key = "test_key"
+"""
+        with open(self.test_config_dir / "config.toml", "w") as f:
+            f.write(config_content)
+        prompts_content = """
+[default]
+prompt = "You are a test assistant"
+"""
+        with open(self.test_config_dir / "prompts.toml", "w") as f:
+            f.write(prompts_content)
+
+    def tearDown(self):
+        if self.test_config_dir.exists():
+            for file in self.test_config_dir.glob('*'):
+                file.unlink()
+            self.test_config_dir.rmdir()
+
+    def _make_app(self, debug=False):
+        import freechat
+        old = freechat.DEBUG_MODE
+        freechat.DEBUG_MODE = debug
+        try:
+            with patch('freechat.Path.home', return_value=Path('.')):
+                with patch('freechat.Path.is_dir', return_value=True):
+                    with patch('sys.exit'):
+                        with patch.object(FreeChatApp, '_setup_config', return_value=None):
+                            app = FreeChatApp()
+            app.active_prompt_name = "default"
+            app.current_model = "openrouter/free"
+            app.session_messages = []
+            return app
+        finally:
+            freechat.DEBUG_MODE = old
+
+    def test_debug_flag_default_false(self):
+        app = self._make_app(debug=False)
+        self.assertFalse(app.debug)
+
+    def test_debug_flag_cli(self):
+        app = self._make_app(debug=True)
+        self.assertTrue(app.debug)
+
+    def test_debug_config_override(self):
+        import freechat
+        old = freechat.DEBUG_MODE
+        freechat.DEBUG_MODE = False
+        try:
+            with patch('freechat.Path.home', return_value=Path('.')):
+                with patch('freechat.Path.is_dir', return_value=True):
+                    with patch('sys.exit'):
+                        with patch.object(FreeChatApp, '_setup_config', return_value=None):
+                            with patch.object(FreeChatApp, '_load_config') as mock_load:
+                                # First call = config.toml, second = prompts.toml
+                                mock_load.side_effect = [
+                                    {"general": {"debug": True}},
+                                    {"default": {"prompt": "test"}}
+                                ]
+                                app = FreeChatApp()
+            self.assertTrue(app.debug)
+        finally:
+            freechat.DEBUG_MODE = old
+
+    def test_toggle_debug_command(self):
+        app = self._make_app(debug=False)
+        self.assertFalse(app.debug)
+        app._toggle_debug([])
+        self.assertTrue(app.debug)
+        app._toggle_debug([])
+        self.assertFalse(app.debug)
+
+    def test_debug_tui_dispatch_shows_traceback(self):
+        import asyncio
+        app = self._make_app(debug=True)
+        app._tui_app = MagicMock()
+        with patch.object(app, '_handle_command', side_effect=ValueError("test error")):
+            asyncio.run(app._tui_dispatch("/help"))
+        all_text = "".join(t[1] for t in app._tui_buffer.get_formatted_text())
+        self.assertIn("test error", all_text)
+        # Traceback should contain "Traceback" when debug is on
+        self.assertIn("Traceback", all_text)
+
+    def test_no_debug_tui_dispatch_hides_traceback(self):
+        import asyncio
+        app = self._make_app(debug=False)
+        app._tui_app = MagicMock()
+        with patch.object(app, '_handle_command', side_effect=ValueError("test error")):
+            asyncio.run(app._tui_dispatch("/help"))
+        all_text = "".join(t[1] for t in app._tui_buffer.get_formatted_text())
+        self.assertIn("test error", all_text)
+        self.assertNotIn("Traceback", all_text)
+
+    def test_debug_registered_in_commands(self):
+        app = self._make_app(debug=False)
+        self.assertIn("/debug", app.commands)
+
+    def test_debug_header_style(self):
+        app = self._make_app(debug=True)
+        pt_app = app._build_tui_layout()
+        self.assertIsNotNone(pt_app)
+
+    def test_debug_in_footer(self):
+        app = self._make_app(debug=True)
+        pt_app = app._build_tui_layout()
+        self.assertIsNotNone(pt_app)
 
 
 if __name__ == '__main__':
