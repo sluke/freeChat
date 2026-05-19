@@ -323,6 +323,56 @@ openai_api_key = "config_openai_key"
         # Test fallback for missing key
         self.assertEqual(self.app._translate("missing_key"), "missing_key")
 
+    def test_handle_empty_command(self):
+        """Regression: _handle_command with empty input must not crash (A3)."""
+        import asyncio
+        # Empty string and whitespace-only should be no-ops, not IndexError
+        asyncio.run(self.app._handle_command(""))
+        asyncio.run(self.app._handle_command("   "))
+
+    def test_handle_prompt_invalid_model_no_session_corruption(self):
+        """Regression: invalid model id must not corrupt session_messages (A2)."""
+        import asyncio
+        # Set an invalid model id (no '/' separator)
+        self.app.current_model = "bad_no_slash"
+        self.app._tui_buffer = MagicMock()
+        self.app._tui_app = None
+        # Pre-populate with an assistant message that should NOT be popped
+        self.app.session_messages = [{"role": "assistant", "content": "prior"}]
+        asyncio.run(self.app._handle_prompt("test"))
+        # User message should not have been appended; prior message intact
+        self.assertEqual(len(self.app.session_messages), 1)
+        self.assertEqual(self.app.session_messages[0]["content"], "prior")
+
+    def test_stream_chat_response_assembly(self):
+        """Regression: streamed chunks must be assembled in order via join (B1)."""
+        import asyncio
+
+        async def fake_stream(*args, **kwargs):
+            for c in ["Hello", ", ", "world", "!"]:
+                yield c
+
+        mock_provider = MagicMock()
+        mock_provider.stream_chat = fake_stream
+        mock_provider.calculate_cost = MagicMock(return_value=0.001)
+
+        self.app.current_model = "openrouter/test-model"
+        self.app._tui_buffer = MagicMock()
+        self.app._tui_app = None
+        self.app.session_messages = []
+        self.app.session_cost = 0.0
+        self.app.debug = False
+
+        with patch.object(self.app.provider_factory, 'get_provider', return_value=mock_provider):
+            with patch.object(self.app, '_inject_memory_context', new_callable=AsyncMock, return_value=""):
+                asyncio.run(self.app._handle_prompt("hi"))
+
+        # The assembled assistant response must be exactly the concatenated chunks
+        assistant_msgs = [m for m in self.app.session_messages if m["role"] == "assistant"]
+        self.assertEqual(len(assistant_msgs), 1)
+        self.assertEqual(assistant_msgs[0]["content"], "Hello, world!")
+
+
 class TestProviderFactory(unittest.TestCase):
     """Test ProviderFactory class"""
     
@@ -351,10 +401,18 @@ class TestProviderFactory(unittest.TestCase):
         factory = ProviderFactory(config)
         provider = factory.get_provider("openai/gpt-4")
         self.assertIsInstance(provider, AIProvider)
-        
+
         # Test non-existent provider
         provider = factory.get_provider("non_existent/model")
         self.assertIsNone(provider)
+
+    def test_get_provider_empty_or_invalid_model_id(self):
+        """Regression: get_provider must not crash on empty / malformed model_id (A1)."""
+        config = {"providers": {"openai_api_key": "test_key"}}
+        factory = ProviderFactory(config)
+        self.assertIsNone(factory.get_provider(""))
+        self.assertIsNone(factory.get_provider("nodash"))
+        self.assertIsNone(factory.get_provider(None))
 
 
 class TestMemoryEntry(unittest.TestCase):
@@ -524,6 +582,61 @@ class TestMemoryManager(unittest.TestCase):
         stats = self.memory_manager.get_stats()
         self.assertIsInstance(stats, dict)
         self.assertIn('total_memories', stats)
+
+
+    def test_touch_memories_batch(self):
+        """Regression: touch_memories should bulk update in a single query (B2)."""
+        ids = []
+        for i in range(3):
+            mid = self.memory_manager.remember(
+                content=f"Batch memory {i}",
+                category="test",
+                importance=5
+            )
+            ids.append(mid)
+
+        # Batch touch all memories
+        result = self.memory_manager.touch_memories(ids)
+        self.assertTrue(result)
+
+        # Empty input is a no-op
+        self.assertTrue(self.memory_manager.touch_memories([]))
+
+        # Verify access_count incremented
+        for mid in ids:
+            mem = self.memory_manager._store.get_memory(mid)
+            self.assertIsNotNone(mem)
+            self.assertGreaterEqual(mem.access_count, 1)
+
+    def test_memory_stats_single_query(self):
+        """Regression: get_stats must execute exactly one SELECT (D1)."""
+        self.memory_manager.remember(content="m1", category="test", importance=5)
+        self.memory_manager.remember(content="m2", category="test", importance=7)
+
+        store = self.memory_manager._store
+        real_conn = store._get_connection()
+
+        class CountingConn:
+            def __init__(self, real):
+                self._real = real
+                self.select_count = 0
+            def execute(self, sql, *args, **kwargs):
+                if sql.strip().upper().startswith("SELECT"):
+                    self.select_count += 1
+                return self._real.execute(sql, *args, **kwargs)
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        counter = CountingConn(real_conn)
+        with patch.object(store, '_get_connection', return_value=counter):
+            stats = store.get_stats()
+
+        self.assertIsInstance(stats, dict)
+        self.assertEqual(counter.select_count, 1, "get_stats should execute exactly 1 SELECT query")
 
 
 class TestBranchMemoryManager(unittest.TestCase):

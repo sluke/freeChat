@@ -59,7 +59,7 @@ if "--debug" in sys.argv:
 # --- End of Bootstrap ---
 
 # --- Main Application Imports ---
-import asyncio, json, re, logging, math, operator, ast, hashlib, hmac, secrets, sqlite3, uuid, threading
+import asyncio, json, re, logging, math, operator, ast, hashlib, hmac, secrets, sqlite3, uuid, threading, traceback
 from collections import OrderedDict
 from pathlib import Path
 from abc import ABC, abstractmethod
@@ -222,6 +222,8 @@ class FreeChatApp:
         self.MAX_TOKEN_CACHE_BYTES: int = 512 * 1024  # 512 KB max cache memory
         self._stream_buffer: List[str] = []
         self._STREAM_BUFFER_THRESHOLD: int = 128
+        self._last_stream_invalidate: float = 0.0
+        self._STREAM_INVALIDATE_INTERVAL: float = 0.05  # 50ms minimum between TUI redraws during streaming
         self.session_cost: float = 0.0
         self.session_name: Optional[str] = None
         self.available_models: Dict[str, List[str]] = {}
@@ -638,39 +640,46 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         """Count tokens with caching to avoid repeated calculations."""
         if not self.tokenizer:
             return 0
-        if text in self._token_cache:
-            # Move to end to mark as recently used
+        cached = self._token_cache.get(text)
+        if cached is not None:
             self._token_cache.move_to_end(text)
-            return self._token_cache[text]
+            return cached[0]
         count = len(self.tokenizer.encode(text))
         text_size = len(text.encode('utf-8'))
         # Skip caching for oversized texts to prevent memory spikes
         if text_size <= self.MAX_TOKEN_CACHE_BYTES:
-            self._token_cache[text] = count
+            self._token_cache[text] = (count, text_size)
             self._token_cache_bytes += text_size
             # Evict by both entry count and total byte size
             while (len(self._token_cache) > 1000 or
                    self._token_cache_bytes > self.MAX_TOKEN_CACHE_BYTES):
-                removed_text, _ = self._token_cache.popitem(last=False)
-                self._token_cache_bytes -= len(removed_text.encode('utf-8'))
+                _, (_, removed_size) = self._token_cache.popitem(last=False)
+                self._token_cache_bytes -= removed_size
         return count
     
-    def _flush_stream_buffer(self):
-        """Flush accumulated stream buffer to TUI chat display."""
+    def _flush_stream_buffer(self, force_invalidate: bool = False):
+        """Flush accumulated stream buffer to TUI chat display.
+
+        Throttles TUI invalidation to STREAM_INVALIDATE_INTERVAL during streaming
+        to reduce render thrashing. Pass force_invalidate=True for final flushes.
+        """
         if self._stream_buffer:
             chunk = "".join(self._stream_buffer)
             if self._tui_active:
                 self._tui_buffer.append_raw(chunk)
                 if self._tui_app:
-                    self._tui_app.invalidate()
+                    now = time.monotonic()
+                    if force_invalidate or (now - self._last_stream_invalidate) >= self._STREAM_INVALIDATE_INTERVAL:
+                        self._tui_app.invalidate()
+                        self._last_stream_invalidate = now
             else:
                 sys.stdout.write(chunk)
                 sys.stdout.flush()
             self._stream_buffer.clear()
 
-    async def _flush_stream_buffer_async(self):
+    async def _flush_stream_buffer_async(self, force_invalidate: bool = False):
         """Async wrapper to flush buffer."""
-        self._flush_stream_buffer()
+        self._flush_stream_buffer(force_invalidate=force_invalidate)
 
     def _manage_message_history(self):
         """Manage message history using token budget with message count fallback."""
@@ -992,7 +1001,6 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         except Exception as e:
             self._tui_buffer.print(f"[bold red]Error: {e}[/bold red]")
             if self.debug:
-                import traceback
                 self._tui_buffer.print(f"[dim]{traceback.format_exc()}[/dim]")
         finally:
             if self._tui_app:
@@ -1001,6 +1009,8 @@ prompt = """You are a multilingual translator. Your task is to translate the use
 
     async def _handle_command(self, user_input: str):
         parts = user_input.strip().split(maxsplit=1)
+        if not parts:
+            return
         cmd, args = parts[0], parts[1].split() if len(parts) > 1 else []
         if func := self.commands.get(cmd): await func(args) if asyncio.iscoroutinefunction(func) else func(args)
         else: self.output.print(f"[yellow]Unknown command: {cmd}. Type /help.[/yellow]")
@@ -1320,8 +1330,16 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             try:
                 with open(session_file, "r", encoding="utf-8") as f:
                     session_data = json.load(f)
-                self.session_messages = session_data.get("messages", [])
-                self.session_cost = session_data.get("cost", 0.0)
+                if not isinstance(session_data, dict):
+                    raise ValueError("Session file is not a JSON object")
+                messages = session_data.get("messages", [])
+                cost = session_data.get("cost", 0.0)
+                if not isinstance(messages, list):
+                    raise ValueError("Session 'messages' field must be a list")
+                if not isinstance(cost, (int, float)):
+                    raise ValueError("Session 'cost' field must be numeric")
+                self.session_messages = messages
+                self.session_cost = float(cost)
                 self.active_prompt_name = session_data.get("prompt", self.default_prompt_name)
                 self.current_model = session_data.get("model", self.current_model)
                 self.output.print(f"[bold green]✓ Session '{session_name}' loaded successfully.[/bold green]")
@@ -1329,6 +1347,9 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             except FileNotFoundError:
                 self.output.print(f"[bold red]Session '{session_name}' not found.[/bold red]")
                 self._log("error", f"Session '{session_name}' not found")
+            except (ValueError, json.JSONDecodeError) as e:
+                self.output.print(f"[bold red]Invalid session file '{session_name}': {e}[/bold red]")
+                self._log("error", f"Invalid session file '{session_name}': {e}")
             except Exception as e:
                 self.output.print(f"[bold red]Error loading session: {e}[/bold red]")
                 self._log("error", f"Failed to load session '{session_name}': {e}")
@@ -1372,7 +1393,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
                 # Read file content based on extension
                 extension = file.suffix.lower()
                 if extension in ['.txt', '.md', '.json', '.csv', '.py', '.js', '.html', '.css']:
-                    with open(file, 'r', encoding='utf-8') as f:
+                    with open(file, 'r', encoding='utf-8', errors='replace') as f:
                         content = f.read()
                     # Add file content to chat context
                     file_info = f"[File: {file.name}]\n\n{content}"
@@ -2014,8 +2035,16 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             if self._tui_app:
                 self._tui_app.invalidate()
             return
-        self.session_messages.append({"role": "user", "content": prompt})
-        prompt_tokens = self._count_tokens(prompt)
+        if '/' not in self.current_model:
+            self._tui_buffer.append_formatted('class:error-text', f"Error: Invalid model id '{self.current_model}'. Expected format 'provider/model'.\n")
+            if self._tui_app:
+                self._tui_app.invalidate()
+            return
+        provider_name, model_name = self.current_model.split('/', 1)
+
+        user_msg = {"role": "user", "content": prompt}
+        self.session_messages.append(user_msg)
+        prompt_tokens = await asyncio.to_thread(self._count_tokens, prompt)
 
         # [Memory Injection] Recall relevant memories and inject into context
         memory_context = await self._inject_memory_context(prompt)
@@ -2024,10 +2053,8 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             temp_memory_msg = {"role": "system", "content": memory_context}
             self.session_messages.insert(-1, temp_memory_msg)
 
-        # [V2.2.1] Removed smart cleaning. The exact model name is used.
-        provider_name, model_name = self.current_model.split('/', 1)
-
-        full_response, start_time = "", time.time()
+        full_response_parts: List[str] = []
+        start_time = time.time()
         self._tui_buffer.show_typing()
         if self._tui_app:
             self._tui_app.invalidate()
@@ -2038,7 +2065,7 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             stream = provider.stream_chat(self.session_messages, model_name)
             buffer_len = 0
             async for chunk in stream:
-                full_response += chunk
+                full_response_parts.append(chunk)
                 self._stream_buffer.append(chunk)
                 buffer_len += len(chunk)
                 if buffer_len >= self._STREAM_BUFFER_THRESHOLD:
@@ -2048,34 +2075,44 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             if self._tui_app:
                 self._tui_app.invalidate()
         except httpx.HTTPStatusError as e:
-            try: await e.response.aread(); error_body = e.response.text
-            except Exception: error_body = str(e)
+            try:
+                await asyncio.wait_for(e.response.aread(), timeout=5.0)
+                error_body = e.response.text
+            except Exception:
+                error_body = str(e)
             self.output.print(f"\n[bold red]API Error {e.response.status_code}:[/bold red] {error_body}")
             if self.debug:
-                import traceback
                 self.output.print(f"[dim]{traceback.format_exc()}[/dim]")
-            self.session_messages.pop(); return
+            if self.session_messages and self.session_messages[-1] is user_msg:
+                self.session_messages.pop()
+            return
         except Exception as e:
             self.output.print(f"\n[bold red]Error: {e}[/bold red]")
             if self.debug:
-                import traceback
                 self.output.print(f"[dim]{traceback.format_exc()}[/dim]")
-            self.session_messages.pop(); return
+            if self.session_messages and self.session_messages[-1] is user_msg:
+                self.session_messages.pop()
+            return
         finally:
             self._tui_buffer.hide_typing()
             if self._stream_buffer:
-                await self._flush_stream_buffer_async()
-            if temp_memory_msg and temp_memory_msg in self.session_messages:
-                self.session_messages.remove(temp_memory_msg)
+                await self._flush_stream_buffer_async(force_invalidate=True)
+            if temp_memory_msg is not None:
+                try:
+                    self.session_messages.remove(temp_memory_msg)
+                except ValueError:
+                    pass
             if self._tui_app:
                 self._tui_app.invalidate()
+        full_response = "".join(full_response_parts)
         self.session_messages.append({"role": "assistant", "content": full_response})
         self._manage_message_history()
-        cost = provider.calculate_cost(prompt_tokens, self._count_tokens(full_response), model_name)
+        response_tokens = await asyncio.to_thread(self._count_tokens, full_response)
+        cost = provider.calculate_cost(prompt_tokens, response_tokens, model_name)
         if cost is not None: self.session_cost += cost
         if self._tui_app:
             self._tui_app.invalidate()
-        
+
     async def _inject_memory_context(self, prompt: str) -> str:
         """Recall relevant memories and format them for injection into chat context."""
         try:
@@ -2087,9 +2124,8 @@ prompt = """You are a multilingual translator. Your task is to translate the use
             if not related_memories:
                 return ""
 
-            # Update access stats for recalled memories
-            for mem in related_memories:
-                self.memory_manager.touch_memory(mem.id)
+            # Update access stats for recalled memories (batch query)
+            self.memory_manager.touch_memories([mem.id for mem in related_memories])
 
             lines = ["[Relevant context from memory:]"]
             for mem in related_memories:
@@ -2104,8 +2140,8 @@ prompt = """You are a multilingual translator. Your task is to translate the use
         for provider in self.provider_factory.providers.values():
             try:
                 await provider.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.getLogger('FreeChat').warning(f"Provider close failed: {e}")
     
     async def run(self):
         # Show welcome banner in TUI chat area
@@ -2565,6 +2601,7 @@ class SQLiteMemoryStore:
     CREATE INDEX IF NOT EXISTS idx_memories_accessed ON memories(accessed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(is_archived) WHERE is_archived = 0;
     CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag);
+    CREATE INDEX IF NOT EXISTS idx_memory_tags_memory_id_tag ON memory_tags(memory_id, tag);
     '''
 
     def __init__(self, db_path: Union[str, Path]):
@@ -2685,8 +2722,7 @@ class SQLiteMemoryStore:
 
                 results = []
                 for row in rows:
-                    tags_list = row['tags_str'].split(',') if row['tags_str'] else []
-                    results.append(self._row_to_entry(row, tags_list))
+                    results.append(self._row_to_entry(row))
 
                 return results
         except sqlite3.Error as e:
@@ -2861,15 +2897,9 @@ class SQLiteMemoryStore:
                     GROUP BY m.id
                 ''', (fts_query,)).fetchall()
 
-                # Fallback to full scan if FTS returns no candidates
+                # If FTS5 returns no candidates, no similar memories exist — skip full table scan
                 if not candidate_rows:
-                    candidate_rows = conn.execute('''
-                        SELECT m.*, GROUP_CONCAT(mt.tag) as tags_str
-                        FROM memories m
-                        LEFT JOIN memory_tags mt ON m.id = mt.memory_id
-                        WHERE m.is_archived = 0
-                        GROUP BY m.id
-                    ''').fetchall()
+                    return []
 
                 results = []
                 for row in candidate_rows:
@@ -2878,8 +2908,7 @@ class SQLiteMemoryStore:
                         continue
                     overlap = len(words & mem_words) / max(len(words), len(mem_words))
                     if overlap >= threshold:
-                        tags_list = row['tags_str'].split(',') if row['tags_str'] else []
-                        results.append((self._row_to_entry(row, tags_list), overlap))
+                        results.append((self._row_to_entry(row), overlap))
 
                 results.sort(key=lambda x: x[1], reverse=True)
                 return [entry for entry, _ in results[:5]]
@@ -2907,8 +2936,7 @@ class SQLiteMemoryStore:
 
                 results = []
                 for row in rows:
-                    tags_list = row['tags_str'].split(',') if row['tags_str'] else []
-                    results.append(self._row_to_entry(row, tags_list))
+                    results.append(self._row_to_entry(row))
                 return results
         except sqlite3.Error as e:
             logging.error(f"Failed to get recent memories: {e}")
@@ -2941,8 +2969,7 @@ class SQLiteMemoryStore:
 
                 results = []
                 for row in rows:
-                    tags_list = row['tags_str'].split(',') if row['tags_str'] else []
-                    results.append(self._row_to_entry(row, tags_list))
+                    results.append(self._row_to_entry(row))
                 return results
         except sqlite3.Error as e:
             logging.error(f"Failed to get related memories: {e}")
@@ -3002,8 +3029,7 @@ class SQLiteMemoryStore:
 
                 results = []
                 for row in rows:
-                    tags_list = row['tags_str'].split(',') if row['tags_str'] else []
-                    results.append(self._row_to_entry(row, tags_list))
+                    results.append(self._row_to_entry(row))
                 return results
         except sqlite3.Error as e:
             logging.error(f"Failed advanced search: {e}")
@@ -3013,11 +3039,20 @@ class SQLiteMemoryStore:
         """Get database statistics."""
         try:
             with self._get_connection() as conn:
-                total = conn.execute('SELECT COUNT(*) FROM memories').fetchone()[0]
-                archived = conn.execute('SELECT COUNT(*) FROM memories WHERE is_archived = 1').fetchone()[0]
-                global_memories = conn.execute('SELECT COUNT(*) FROM memories WHERE branch IS NULL').fetchone()[0]
-                branches = conn.execute('SELECT COUNT(DISTINCT branch) FROM memories WHERE branch IS NOT NULL').fetchone()[0]
-                avg_score = conn.execute('SELECT AVG(value_score) FROM memories').fetchone()[0] or 0
+                row = conn.execute('''
+                    SELECT
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN is_archived = 1 THEN 1 ELSE 0 END) AS archived,
+                        SUM(CASE WHEN branch IS NULL THEN 1 ELSE 0 END) AS global_memories,
+                        COUNT(DISTINCT CASE WHEN branch IS NOT NULL THEN branch END) AS branches,
+                        AVG(value_score) AS avg_score
+                    FROM memories
+                ''').fetchone()
+                total = row['total'] or 0
+                archived = row['archived'] or 0
+                global_memories = row['global_memories'] or 0
+                branches = row['branches'] or 0
+                avg_score = row['avg_score'] or 0
 
                 return {
                     'total_memories': total,
@@ -3031,8 +3066,14 @@ class SQLiteMemoryStore:
             logging.error(f"Failed to get stats: {e}")
             return {}
 
-    def _row_to_entry(self, row: sqlite3.Row, tags: List[str]) -> MemoryEntry:
-        """Convert a database row to MemoryEntry."""
+    def _row_to_entry(self, row: sqlite3.Row, tags: Optional[List[str]] = None) -> MemoryEntry:
+        """Convert a database row to MemoryEntry.
+
+        If tags is None, derive from row['tags_str'] (GROUP_CONCAT result).
+        """
+        if tags is None:
+            tags_str = row['tags_str'] if 'tags_str' in row.keys() else None
+            tags = tags_str.split(',') if tags_str else []
         is_compressed = bool(row['is_compressed'])
         content = row['content_compressed'] if is_compressed and row['content_compressed'] else row['content']
         return MemoryEntry(
@@ -3197,6 +3238,25 @@ class MemoryManager:
                         accessed_at = ?
                     WHERE id = ?
                 ''', (time.time(), memory_id))
+                conn.commit()
+                return True
+        except sqlite3.Error:
+            return False
+
+    def touch_memories(self, memory_ids: List[str]) -> bool:
+        """Batch update access count and last accessed time for multiple memories."""
+        if not memory_ids:
+            return True
+        try:
+            placeholders = ",".join("?" * len(memory_ids))
+            with self._store._get_connection() as conn:
+                conn.execute(
+                    f'''UPDATE memories
+                        SET access_count = access_count + 1,
+                            accessed_at = ?
+                        WHERE id IN ({placeholders})''',
+                    [time.time(), *memory_ids]
+                )
                 conn.commit()
                 return True
         except sqlite3.Error:
@@ -4232,10 +4292,10 @@ class AIProvider(ABC):
                             )
                         )
                         transport = retry_transport
-                except (ValueError, IndexError):
-                    pass
-        except Exception:
-            pass
+                except (ValueError, IndexError) as e:
+                    logging.getLogger('FreeChat').debug(f"httpx version parse failed, retry transport disabled: {e}")
+        except (AttributeError, TypeError) as e:
+            logging.getLogger('FreeChat').debug(f"httpx retry transport setup failed: {e}")
 
         self.http = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=5.0, read=20.0, write=5.0),
@@ -4438,7 +4498,10 @@ class ProviderFactory:
         if key := cfg.get("anthropic_api_key"): self.providers["anthropic"] = OpenAIProvider(key, "https://api.anthropic.com/v1", "anthropic")
         if key := cfg.get("mistral_api_key"): self.providers["mistral"] = OpenAIProvider(key, "https://api.mistral.ai/v1", "mistral")
         if key := cfg.get("nvidia_api_key"): self.providers["nvidia"] = OpenAIProvider(key, "https://integrate.api.nvidia.com/v1", "nvidia")
-    def get_provider(self, model_id: str) -> Optional[AIProvider]: return self.providers.get(model_id.split('/')[0])
+    def get_provider(self, model_id: str) -> Optional[AIProvider]:
+        if not model_id or '/' not in model_id:
+            return None
+        return self.providers.get(model_id.split('/', 1)[0])
     def get_available_providers(self) -> List[str]: return list(self.providers.keys())
 
 # --- Main Execution ---
